@@ -5,8 +5,17 @@ import os
 import sqlite3
 
 import chromadb
+from chromadb.config import Settings
 
 from .base import BaseCollection
+
+# Disable ChromaDB's PostHog telemetry. Without this, every query sends data
+# to posthog.com, violating MemPalace's local-first guarantee. Set at import
+# time (env var) and again at client-creation time (Settings object) as belt-
+# and-suspenders — the env var covers C-level telemetry before Python sees it.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
+_CHROMA_SETTINGS = Settings(anonymized_telemetry=False)
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +95,9 @@ class ChromaBackend:
         """Return a cached PersistentClient for *palace_path*, creating one if needed."""
         if palace_path not in self._clients:
             _fix_blob_seq_ids(palace_path)
-            self._clients[palace_path] = chromadb.PersistentClient(path=palace_path)
+            self._clients[palace_path] = chromadb.PersistentClient(
+                path=palace_path, settings=_CHROMA_SETTINGS
+            )
         return self._clients[palace_path]
 
     # ------------------------------------------------------------------
@@ -101,7 +112,7 @@ class ChromaBackend:
         inode/mtime-based client cache.
         """
         _fix_blob_seq_ids(palace_path)
-        return chromadb.PersistentClient(path=palace_path)
+        return chromadb.PersistentClient(path=palace_path, settings=_CHROMA_SETTINGS)
 
     @staticmethod
     def backend_version() -> str:
