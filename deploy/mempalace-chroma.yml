@@ -1,0 +1,23 @@
+services:
+  mempalace-chroma:
+    image: chromadb/chroma:1.0.8
+    container_name: mempalace-chroma
+    restart: unless-stopped
+    environment:
+      - CHROMA_SERVER_AUTHN_CREDENTIALS=PLACEHOLDER
+      - CHROMA_SERVER_AUTHN_PROVIDER=chromadb.auth.token_authn.TokenAuthenticationServerProvider
+      - ALLOW_RESET=FALSE
+    volumes:
+      - /share/Docker/mempalace-chroma:/chroma/chroma
+    networks:
+      - default
+      - traefik-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  traefik-network:
+    external: true
