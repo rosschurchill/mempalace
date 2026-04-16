@@ -653,10 +653,37 @@ def tool_add_drawer(
                 }
             ],
         )
+        # Read-back verify: confirm the drawer actually landed in the collection.
+        # ChromaDB can return from upsert without raising even when the underlying
+        # write didn't persist (e.g. sync_threshold lag, compactor race). A
+        # get() immediately after upsert is the only reliable confirmation.
+        verify = col.get(ids=[drawer_id])
+        if not verify or not verify.get("ids"):
+            _wal_log(
+                "add_drawer",
+                {"drawer_id": drawer_id, "wing": wing, "room": room},
+                result={"success": False, "error": "write not persisted — read-back returned empty"},
+            )
+            return {
+                "success": False,
+                "error": "Drawer write did not persist. Check wal/write_log.jsonl.",
+                "drawer_id": drawer_id,
+            }
         _metadata_cache = None
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
-        return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
+        result = {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
+        _wal_log(
+            "add_drawer",
+            {"drawer_id": drawer_id, "wing": wing, "room": room},
+            result=result,
+        )
+        return result
     except Exception as e:
+        _wal_log(
+            "add_drawer",
+            {"drawer_id": drawer_id, "wing": wing, "room": room},
+            result={"success": False, "error": str(e)},
+        )
         return {"success": False, "error": str(e)}
 
 
@@ -999,18 +1026,34 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
         return _no_palace()
 
     try:
-        results = col.get(
-            where={"$and": [{"wing": wing}, {"room": "diary"}]},
-            include=["documents", "metadatas"],
-            limit=10000,
-        )
+        # Paginate to avoid the 10K silent truncation (issue #850).
+        # _fetch_all_metadata only returns metadatas; fetch documents separately
+        # in batches using the same pagination pattern.
+        where = {"$and": [{"wing": wing}, {"room": "diary"}]}
+        total = col.count()
+        all_docs = []
+        all_metas = []
+        offset = 0
+        batch_size = 1000
+        while offset < total:
+            batch = col.get(
+                where=where,
+                include=["documents", "metadatas"],
+                limit=batch_size,
+                offset=offset,
+            )
+            if not batch["metadatas"]:
+                break
+            all_docs.extend(batch["documents"])
+            all_metas.extend(batch["metadatas"])
+            offset += len(batch["metadatas"])
 
-        if not results["ids"]:
+        if not all_metas:
             return {"agent": agent_name, "entries": [], "message": "No diary entries yet."}
 
         # Combine and sort by timestamp
         entries = []
-        for doc, meta in zip(results["documents"], results["metadatas"]):
+        for doc, meta in zip(all_docs, all_metas):
             entries.append(
                 {
                     "date": meta.get("date", ""),
@@ -1026,7 +1069,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
         return {
             "agent": agent_name,
             "entries": entries,
-            "total": len(results["ids"]),
+            "total": len(all_metas),
             "showing": len(entries),
         }
     except Exception:
