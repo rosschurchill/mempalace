@@ -23,6 +23,110 @@ _CLOSET_DRAWER_REF_RE = re.compile(r"→([\w,]+)")
 logger = logging.getLogger("mempalace_mcp")
 
 
+# ── MMR (Maximal Marginal Relevance) ─────────────────────────────────────────
+
+def _jaccard_sim(text_a: str, text_b: str) -> float:
+    """Word-set Jaccard similarity — fast pairwise proxy for inter-result sim.
+
+    Full embedding retrieval would be ideal but isn't available in the result
+    dict. Jaccard over word sets is zero-dependency, O(n), and correctly
+    rewards lexical overlap (the main redundancy signal in a memory palace).
+    """
+    tokens_a = set(_TOKEN_RE.findall(text_a.lower()))
+    tokens_b = set(_TOKEN_RE.findall(text_b.lower()))
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = len(tokens_a & tokens_b)
+    union = len(tokens_a | tokens_b)
+    return intersection / union if union else 0.0
+
+
+def mmr_rerank(results: list, n_final: int, mmr_lambda: float = 0.6) -> list:
+    """Apply Maximal Marginal Relevance to a ranked result list.
+
+    MMR iteratively selects results that are relevant to the query AND
+    diverse from already-selected results. Prevents the top-5 from being
+    5 chunks of the same file saying slightly different versions of the
+    same thing.
+
+    Args:
+        results: Already-scored result dicts (must have 'similarity' and 'text').
+        n_final: How many results to return.
+        mmr_lambda: 1.0 = pure relevance (same as current). 0.0 = pure diversity.
+                    Default 0.6 keeps relevance primary while adding variety.
+
+    Returns:
+        Reordered and trimmed list of at most n_final results.
+    """
+    if len(results) <= n_final:
+        return results
+
+    selected: list = []
+    remaining = list(results)  # shallow copy; we pop from this
+
+    while remaining and len(selected) < n_final:
+        if not selected:
+            # First pick: highest similarity
+            best = max(remaining, key=lambda r: r.get("similarity", 0.0))
+        else:
+            # MMR score = λ * query_sim  -  (1-λ) * max_sim_to_selected
+            selected_texts = [s["text"] for s in selected]
+
+            def _mmr_score(r):
+                query_sim = r.get("similarity", 0.0)
+                max_redundancy = max(
+                    _jaccard_sim(r["text"], st) for st in selected_texts
+                )
+                return mmr_lambda * query_sim - (1 - mmr_lambda) * max_redundancy
+
+            best = max(remaining, key=_mmr_score)
+
+        selected.append(best)
+        remaining.remove(best)
+
+    return selected
+
+
+# ── Cross-wing balancing ──────────────────────────────────────────────────────
+
+def _cross_wing_balance(candidates: list, n_results: int) -> list:
+    """Ensure no single wing monopolises the result set.
+
+    When one wing has 50× more drawers than another, raw vector search
+    always returns results from that wing — even for queries more relevant
+    to the smaller wing. This function imposes a per-wing candidate cap
+    before the final sort so each wing gets fair representation.
+
+    Cap = ceil(n_results * 2.5 / num_wings), minimum 2 per wing.
+    The 2.5× multiplier leaves headroom for MMR to make further selections
+    from a balanced pool.
+    """
+    if not candidates:
+        return candidates
+
+    import collections
+    import math
+
+    by_wing: dict = collections.defaultdict(list)
+    for r in candidates:
+        by_wing[r.get("wing", "unknown")].append(r)
+
+    num_wings = len(by_wing)
+    if num_wings <= 1:
+        return candidates  # No balancing needed for single-wing results
+
+    per_wing_cap = max(2, math.ceil(n_results * 2.5 / num_wings))
+
+    balanced: list = []
+    for wing_results in by_wing.values():
+        # Keep best candidates from this wing (already sorted by score)
+        balanced.extend(wing_results[:per_wing_cap])
+
+    # Re-sort by effective distance so the best overall still wins
+    balanced.sort(key=lambda r: r.get("effective_distance", r.get("distance", 1.0)))
+    return balanced
+
+
 class SearchError(Exception):
     """Raised when search cannot proceed (e.g. no palace found)."""
 
@@ -307,6 +411,8 @@ def search_memories(  # noqa: C901
     room: str = None,
     n_results: int = 5,
     max_distance: float = 0.0,
+    mmr_lambda: float = 0.6,
+    cross_wing_balance: bool = True,
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -448,6 +554,15 @@ def search_memories(  # noqa: C901
         scored.append(entry)
 
     scored.sort(key=lambda h: h["_sort_key"])
+
+    # Cross-wing balancing: prevent large wings from monopolising results.
+    # Applied before MMR so MMR sees a fairly distributed candidate pool.
+    if cross_wing_balance and not wing:
+        # Only balance when no explicit wing filter — scoped searches are
+        # already restricted to one wing, balancing would be a no-op.
+        scored = _cross_wing_balance(scored, n_results)
+        scored.sort(key=lambda h: h["_sort_key"])
+
     hits = scored[:n_results]
 
     # Drawer-grep enrichment: for closet-boosted hits whose source has
@@ -507,7 +622,22 @@ def search_memories(  # noqa: C901
 
     # BM25 hybrid re-rank within the final candidate set.
     hits = _hybrid_rank(hits, query)
+
+    # MMR deduplication: prevent the top-N from all being chunks of the same
+    # file. Applied after BM25 re-rank so MMR sees the final similarity scores.
+    if mmr_lambda < 1.0 and len(hits) > 1:
+        hits = mmr_rerank(hits, n_final=n_results, mmr_lambda=mmr_lambda)
+
     for h in hits:
+        # Promote internal scoring fields into pipeline_trace for explainability,
+        # then remove them from the top-level result dict.
+        h["pipeline_trace"] = {
+            "vector_sim": round(max(0.0, 1.0 - h.get("distance", 1.0)), 3),
+            "bm25_score": h.get("bm25_score", 0.0),
+            "closet_boost": h.get("closet_boost", 0.0),
+            "effective_distance": h.get("effective_distance", h.get("distance", 1.0)),
+            "matched_via": h.get("matched_via", "drawer"),
+        }
         h.pop("_sort_key", None)
         h.pop("_source_file_full", None)
         h.pop("_chunk_index", None)

@@ -71,6 +71,8 @@ from .palace_graph import (  # noqa: E402
 )
 
 from .knowledge_graph import KnowledgeGraph  # noqa: E402
+from .explain import run_explain  # noqa: E402
+from .entity_registry import EntityRegistry  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -102,6 +104,8 @@ if _args.palace:
 else:
     _kg = KnowledgeGraph()
 
+# Entity registry — loaded lazily, shared across all tool calls.
+_entity_registry = EntityRegistry.load()
 
 _client_cache = None
 _collection_cache = None
@@ -1178,9 +1182,91 @@ def tool_reconnect():
         return {"success": False, "error": str(e)}
 
 
+def tool_explain(
+    query: str,
+    wing: str = None,
+    memory_type: str = None,
+    include_kg: bool = True,
+    n_results: int = 5,
+):
+    """Decision archaeology — entity-aware search with KG enrichment.
+
+    Wires Entity Registry + Knowledge Graph + Wing scoping + Hybrid Search
+    into one intelligent pipeline. Best for questions like:
+      "Why did we choose Postgres for Orion?"
+      "What did we decide about Max's school?"
+      "How did the API design evolve?"
+
+    Unlike mempalace_search (which runs unscoped vector search), this tool:
+    1. Extracts entities from the query (known people + capitalized terms)
+    2. Queries the KG for temporal facts about each entity
+    3. Auto-scopes the search to the most relevant wing
+    4. Returns structured results: KG facts + verbatim memory hits + reasoning
+
+    Other AI memory systems (Mem0, Zep) remember facts. MemPalace remembers
+    reasoning — the alternatives considered, who advocated for what, and the
+    full deliberation in verbatim quotes.
+    """
+    col = _get_collection()
+    if not col:
+        return _no_palace()
+    try:
+        return run_explain(
+            query=query,
+            palace_path=_config.palace_path,
+            col=col,
+            kg=_kg,
+            entity_registry=_entity_registry,
+            wing_override=wing,
+            memory_type=memory_type,
+            include_kg=include_kg,
+            n_results=n_results,
+        )
+    except Exception as e:
+        logger.exception("tool_explain failed")
+        return {"error": str(e), "query": query}
+
+
 # ==================== MCP PROTOCOL ====================
 
 TOOLS = {
+    "mempalace_explain": {
+        "description": (
+            "Decision archaeology — entity-aware search with KG enrichment. "
+            "Best for 'Why did we choose X?', 'What did we decide about Y?', "
+            "'How did Z evolve?'. Auto-detects entities, queries the knowledge graph "
+            "for temporal facts, scopes search to the relevant wing, and returns "
+            "verbatim reasoning + alternatives + KG timeline. "
+            "Unlike mempalace_search (generic), this surfaces the WHY behind decisions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language question about a decision, entity, or event",
+                },
+                "wing": {
+                    "type": "string",
+                    "description": "Override auto-detected wing (optional)",
+                },
+                "memory_type": {
+                    "type": "string",
+                    "description": "Filter by room/type: 'decisions', 'problems', 'milestones', etc. (optional)",
+                },
+                "include_kg": {
+                    "type": "boolean",
+                    "description": "Include KG facts in the response (default true)",
+                },
+                "n_results": {
+                    "type": "integer",
+                    "description": "Max results to return (default 5)",
+                },
+            },
+            "required": ["query"],
+        },
+        "handler": tool_explain,
+    },
     "mempalace_status": {
         "description": "Palace overview — total drawers, wing and room counts",
         "input_schema": {"type": "object", "properties": {}},

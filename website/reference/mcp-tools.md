@@ -1,6 +1,36 @@
 # MCP Tools Reference
 
-Detailed parameter schemas for all 29 MCP tools.
+Detailed parameter schemas for all 30 MCP tools.
+
+## Intelligence Tools
+
+### `mempalace_explain`
+
+Decision archaeology — entity-aware search with KG enrichment. The flagship retrieval tool for answering *why* and *how* questions about past decisions.
+
+Unlike `mempalace_search` (generic unscoped vector search), this tool:
+1. Extracts entities from the query (known people + capitalized project names)
+2. Queries the Knowledge Graph for temporal facts about each entity
+3. Auto-scopes the search to the detected entity's wing
+4. Returns verbatim reasoning, KG timeline, and alternatives considered
+
+**Use for:** "Why did we choose Postgres for Orion?", "What did we decide about the API design?", "How did Max's situation evolve?"
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | **Yes** | Natural language question about a decision, entity, or event |
+| `wing` | string | No | Override auto-detected wing |
+| `memory_type` | string | No | Room filter: `decisions`, `problems`, `milestones`, etc. |
+| `include_kg` | boolean | No | Include KG facts in response (default: `true`) |
+| `n_results` | integer | No | Max results (default: 5) |
+
+**Returns:** `{ query, entities_detected, kg_facts, wing_scope, results, reasoning, total_results }`
+
+Each `kg_facts` entry: `{ entity, subject, predicate, object, valid_from, valid_to, current, source_closet }`
+
+Each `results` entry: same as `mempalace_search` results, plus `pipeline_trace` showing scoring breakdown.
+
+---
 
 ## Palace — Read Tools
 
