@@ -26,7 +26,14 @@ def write_palace_meta(palace_path: str, embedding_model: str) -> None:
 
     Called once per mine run. Idempotent — overwrites on each run so the
     file always reflects the most recent ingest model.
+
+    HTTP mode (MEMPALACE_CHROMA_URL set): no-op. The server holds the data;
+    there is no local palace directory to write metadata into.
     """
+    import os as _os
+    if _os.environ.get("MEMPALACE_CHROMA_URL"):
+        return
+
     meta_path = Path(palace_path) / _PALACE_META_FILE
     try:
         existing: dict = {}

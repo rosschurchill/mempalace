@@ -166,16 +166,16 @@ def _wal_log(operation: str, params: dict, result: dict = None):
 
 
 def _get_client():
-    """Return a ChromaDB PersistentClient, reconnecting if the database changed on disk.
+    """Return a ChromaDB client, reconnecting if the database changed on disk.
 
-    Detects palace rebuilds (repair/nuke/purge) by checking the inode of
-    chroma.sqlite3.  A full rebuild replaces the file, changing the inode.
-    Also detects external writes (scripts, CLI) via mtime changes — the
-    inode check alone misses in-place modifications that invalidate the
-    in-memory HNSW index.
+    HTTP mode (MEMPALACE_CHROMA_URL set):
+        Returns a cached HttpClient. The server manages its own state — there
+        is no local chroma.sqlite3 to stat, so inode/mtime detection is skipped.
+        Cache is only invalidated on an explicit mempalace_reconnect call.
 
-    Note: FAT/exFAT may return 0 for st_ino — the ``current_inode != 0``
-    guard skips reconnect detection on those filesystems (safe fallback).
+    Embedded mode (default):
+        Detects palace rebuilds via chroma.sqlite3 inode changes and external
+        writes via mtime changes, then reconnects automatically.
     """
     global \
         _client_cache, \
@@ -184,6 +184,17 @@ def _get_client():
         _palace_db_mtime, \
         _metadata_cache, \
         _metadata_cache_time
+
+    # HTTP mode: no local file to stat — just return cached client
+    if os.environ.get("MEMPALACE_CHROMA_URL"):
+        if _client_cache is None:
+            _client_cache = ChromaBackend.make_client(_config.palace_path)
+            _collection_cache = None
+            _metadata_cache = None
+            _metadata_cache_time = 0
+        return _client_cache
+
+    # Embedded mode: inode/mtime-based cache invalidation
     db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
     try:
         st = os.stat(db_path)
