@@ -234,6 +234,20 @@ class MempalaceConfig:
         return normalized
 
     @property
+    def embedding_model(self) -> str:
+        """Sentence-transformer model used for vector embeddings.
+
+        Must match between ingest (mempalace mine) and query (MCP server).
+        Changing this after a palace has been built requires a full re-index.
+        Default: all-MiniLM-L6-v2 (384-dim, English-only, fast).
+        Multilingual alternative: paraphrase-multilingual-MiniLM-L12-v2
+        """
+        env_val = os.environ.get("MEMPALACE_EMBEDDING_MODEL")
+        if env_val:
+            return env_val
+        return self._file_config.get("embedding_model", "all-MiniLM-L6-v2")
+
+    @property
     def hook_silent_save(self):
         """Whether the stop hook saves directly (True) or blocks for MCP calls (False)."""
         return self._file_config.get("hooks", {}).get("silent_save", True)

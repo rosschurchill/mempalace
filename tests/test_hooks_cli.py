@@ -159,7 +159,8 @@ def test_stop_hook_passthrough_below_interval(tmp_path):
     assert result == {}
 
 
-def test_stop_hook_blocks_at_interval(tmp_path):
+def test_stop_hook_silent_at_interval(tmp_path):
+    """Default (no MEMPAL_VERBOSE): mine in background, never block the AI."""
     transcript = tmp_path / "t.jsonl"
     _write_transcript(
         transcript,
@@ -170,6 +171,23 @@ def test_stop_hook_blocks_at_interval(tmp_path):
         {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)},
         state_dir=tmp_path,
     )
+    # Silent mode (default) — interval reached but we don't block
+    assert result == {}
+
+
+def test_stop_hook_blocks_in_verbose_mode(tmp_path):
+    """MEMPAL_VERBOSE=true → block and show diary reason in chat."""
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(SAVE_INTERVAL)],
+    )
+    with patch.dict("os.environ", {"MEMPAL_VERBOSE": "true"}):
+        result = _capture_hook_output(
+            hook_stop,
+            {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)},
+            state_dir=tmp_path,
+        )
     assert result["decision"] == "block"
     assert result["reason"] == STOP_BLOCK_REASON
 
@@ -182,11 +200,11 @@ def test_stop_hook_tracks_save_point(tmp_path):
     )
     data = {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)}
 
-    # First call blocks
+    # First call — interval reached, silent mode → passes through
     result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
-    assert result["decision"] == "block"
+    assert result == {}
 
-    # Second call with same count passes through (already saved)
+    # Second call with same count → also passes through (already saved)
     result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
     assert result == {}
 
@@ -326,7 +344,7 @@ def test_parse_harness_input_valid():
 
 
 def test_stop_hook_oserror_on_last_save_read(tmp_path):
-    """When last_save_file has invalid content, falls back to 0."""
+    """When last_save_file has invalid content, falls back to 0 — silent mode returns {}."""
     transcript = tmp_path / "t.jsonl"
     _write_transcript(
         transcript,
@@ -339,7 +357,8 @@ def test_stop_hook_oserror_on_last_save_read(tmp_path):
         {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)},
         state_dir=tmp_path,
     )
-    assert result["decision"] == "block"
+    # Silent mode (default) — interval reached, mine in background, no block
+    assert result == {}
 
 
 def test_stop_hook_oserror_on_write(tmp_path):
@@ -364,7 +383,8 @@ def test_stop_hook_oserror_on_write(tmp_path):
                 },
                 state_dir=tmp_path,
             )
-    assert result["decision"] == "block"
+    # Silent mode (default) — even with write error, hook returns {} not block
+    assert result == {}
 
 
 # --- hook_precompact with MEMPAL_DIR ---
@@ -569,6 +589,6 @@ def test_stop_hook_rejects_injected_stop_hook_active(tmp_path):
         },
         state_dir=tmp_path,
     )
-    # The injected value is not "true"/"1"/"yes", so the hook should NOT pass through
-    # It should count messages and block at the interval
-    assert result["decision"] == "block"
+    # The injected value is not "true"/"1"/"yes", so the hook processes normally.
+    # In silent mode (default), it returns {} — no block, no injection executed.
+    assert result == {}

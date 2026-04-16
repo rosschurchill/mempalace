@@ -6,9 +6,55 @@ Consolidates collection access patterns used by both miners and the MCP server.
 
 import contextlib
 import hashlib
+import json
 import os
+from datetime import datetime
+from pathlib import Path
 
 from .backends.chroma import ChromaBackend
+
+
+# ── Palace metadata ───────────────────────────────────────────────────────────
+# palace_meta.json records embedding model info at mine time so the search path
+# can warn when the query model differs from the ingest model (issue #903/#912).
+
+_PALACE_META_FILE = "palace_meta.json"
+
+
+def write_palace_meta(palace_path: str, embedding_model: str) -> None:
+    """Write embedding model metadata to <palace_path>/palace_meta.json.
+
+    Called once per mine run. Idempotent — overwrites on each run so the
+    file always reflects the most recent ingest model.
+    """
+    meta_path = Path(palace_path) / _PALACE_META_FILE
+    try:
+        existing: dict = {}
+        if meta_path.is_file():
+            try:
+                existing = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                existing = {}
+        existing["embedding_model"] = embedding_model
+        existing["last_mined"] = datetime.now().isoformat()
+        meta_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            meta_path.chmod(0o600)
+        except (OSError, NotImplementedError):
+            pass
+    except OSError:
+        pass  # non-fatal — metadata write failure must never abort a mine run
+
+
+def read_palace_meta(palace_path: str) -> dict:
+    """Read palace_meta.json; return {} if missing or corrupt."""
+    meta_path = Path(palace_path) / _PALACE_META_FILE
+    if not meta_path.is_file():
+        return {}
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 SKIP_DIRS = {
     ".git",

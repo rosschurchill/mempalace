@@ -240,10 +240,17 @@ def hook_stop(data: dict, harness: str):
 
         _log(f"TRIGGERING SAVE at exchange {exchange_count}")
 
-        # Optional: auto-ingest if MEMPAL_DIR is set
+        # Always mine the transcript in the background
         _maybe_auto_ingest(transcript_path)
 
-        _output({"decision": "block", "reason": STOP_BLOCK_REASON})
+        # MEMPAL_VERBOSE=true → block and ask the AI to write diary entries in chat.
+        # Default (silent) → mine in background, never interrupt the conversation.
+        # Mirrors the same gate in hooks/mempal_save_hook.sh.
+        verbose = os.environ.get("MEMPAL_VERBOSE", "").lower() in ("true", "1")
+        if verbose:
+            _output({"decision": "block", "reason": STOP_BLOCK_REASON})
+        else:
+            _output({})
     else:
         _output({})
 

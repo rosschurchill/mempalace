@@ -14,7 +14,7 @@ import math
 import re
 from pathlib import Path
 
-from .palace import get_closets_collection, get_collection
+from .palace import get_closets_collection, get_collection, read_palace_meta
 
 # Closet pointer line format: "topic|entities|→drawer_id_a,drawer_id_b"
 # Multiple lines may join with newlines inside one closet document.
@@ -300,7 +300,7 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     print()
 
 
-def search_memories(
+def search_memories(  # noqa: C901
     query: str,
     palace_path: str,
     wing: str = None,
@@ -331,6 +331,24 @@ def search_memories(
             "error": "No palace found",
             "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
         }
+
+    # Embedding model guard (issue #903/#912): warn when the model used at
+    # ingest time differs from the current config. A mismatch means query
+    # vectors live in a different space than stored vectors — cosine similarity
+    # is mathematically meaningless and results will be garbage.
+    _embedding_warning = None
+    meta = read_palace_meta(palace_path)
+    if meta:
+        from .config import MempalaceConfig
+        current_model = MempalaceConfig().embedding_model
+        ingest_model = meta.get("embedding_model")
+        if ingest_model and ingest_model != current_model:
+            _embedding_warning = (
+                f"⚠ Embedding model mismatch: palace was indexed with '{ingest_model}' "
+                f"but the current config uses '{current_model}'. "
+                f"Search results may be unreliable. Re-run 'mempalace mine' to reindex."
+            )
+            logger.warning(_embedding_warning)
 
     where = build_where_filter(wing, room)
 
@@ -494,9 +512,12 @@ def search_memories(
         h.pop("_source_file_full", None)
         h.pop("_chunk_index", None)
 
-    return {
+    result = {
         "query": query,
         "filters": {"wing": wing, "room": room},
         "total_before_filter": len(_first_or_empty(drawer_results, "documents")),
         "results": hits,
     }
+    if _embedding_warning:
+        result["warning"] = _embedding_warning
+    return result

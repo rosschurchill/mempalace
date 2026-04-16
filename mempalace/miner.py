@@ -25,6 +25,7 @@ from .palace import (
     mine_lock,
     purge_file_closets,
     upsert_closet_lines,
+    write_palace_meta,
 )
 
 READABLE_EXTENSIONS = {
@@ -784,6 +785,10 @@ def mine(
     if not dry_run:
         collection = get_collection(palace_path)
         closets_col = get_closets_collection(palace_path)
+        # Record the embedding model used for this mine so the search path
+        # can detect mismatches before returning bad results (issue #903/#912).
+        from .config import MempalaceConfig
+        write_palace_meta(palace_path, MempalaceConfig().embedding_model)
     else:
         collection = None
         closets_col = None
