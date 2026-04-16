@@ -217,6 +217,61 @@ def cmd_status(args):
     status(palace_path=palace_path)
 
 
+def cmd_pillars(args):
+    """Print the top-N cognitive pillars via KG PageRank."""
+    from .knowledge_graph import KnowledgeGraph
+    from .ambient import get_eigen_thoughts
+
+    n = getattr(args, "n", 5)
+    kg = KnowledgeGraph()
+    result = get_eigen_thoughts(kg, n=n)
+    kg.close()
+
+    pillars = result.get("pillars", [])
+    total = result.get("total_entities", 0)
+
+    print(f"\n  MemPalace Cognitive Pillars  (PageRank, {total} entities)\n")
+    if not pillars:
+        print(f"  {result.get('message', 'Knowledge graph is empty.')}\n")
+        return
+    for p in pillars:
+        bar = "█" * max(1, int(p["score"] * 1000))
+        print(f"  #{p['rank']:>2}  {p['entity']:<30}  {bar}  {p['score']:.4f}")
+    print()
+
+
+def cmd_rem(args):
+    """Run a REM cycle — discover semantic bridges between wings."""
+    from .knowledge_graph import KnowledgeGraph
+    from .rem_cycle import run_rem_cycle
+
+    config = MempalaceConfig()
+    palace_path = os.path.expanduser(args.palace) if args.palace else config.palace_path
+    n_anchors = getattr(args, "n_anchors", 50)
+    threshold = getattr(args, "threshold", 0.15)
+
+    kg = KnowledgeGraph()
+
+    print("\n  MemPalace REM Cycle")
+    print(f"  Palace:   {palace_path}")
+    print(f"  Anchors:  up to {n_anchors} recent drawers")
+    print(f"  Threshold: distance < {threshold} (≈ similarity > {1 - threshold:.0%})\n")
+
+    result = run_rem_cycle(palace_path, kg, n_anchors=n_anchors, threshold=threshold)
+    kg.close()
+
+    if "error" in result:
+        print(f"  Error: {result['error']}\n")
+        return
+
+    print(f"  Scanned:  {result['anchors_scanned']} drawers")
+    print(f"  Bridges created:  {result['bridges_created']}")
+    print(f"  Bridges skipped (already exist):  {result['bridges_skipped_existing']}")
+    if result["wings_involved"]:
+        print(f"  Wings bridged: {', '.join(result['wings_involved'])}")
+    print(f"  Runtime: {result['runtime_ms']}ms\n")
+
+
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
     import shutil
@@ -643,6 +698,15 @@ def main():
 
     sub.add_parser("status", help="Show what's been filed")
 
+    p_pillars = sub.add_parser("pillars", help="Show cognitive pillars via KG PageRank")
+    p_pillars.add_argument("--n", type=int, default=5, help="Number of pillars (default 5)")
+
+    p_rem = sub.add_parser("rem", help="Run REM cycle — discover semantic wing bridges")
+    p_rem.add_argument("--n-anchors", type=int, default=50, dest="n_anchors",
+                       help="Max recent drawers to scan (default 50)")
+    p_rem.add_argument("--threshold", type=float, default=0.15,
+                       help="Cosine distance threshold (default 0.15 ≈ 85%% similarity)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -677,6 +741,8 @@ def main():
         "repair": cmd_repair,
         "migrate": cmd_migrate,
         "status": cmd_status,
+        "pillars": cmd_pillars,
+        "rem": cmd_rem,
     }
     dispatch[args.command](args)
 

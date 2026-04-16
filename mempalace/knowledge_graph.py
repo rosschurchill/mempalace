@@ -204,6 +204,63 @@ class KnowledgeGraph:
                     (ended, sub_id, pred, obj_id),
                 )
 
+    def evolve_fact(
+        self,
+        subject: str,
+        predicate: str,
+        old_obj: str,
+        new_obj: str,
+        new_valid_from: str = None,
+        source_closet: str = None,
+        source_file: str = None,
+    ) -> str:
+        """Record that a belief has changed — cognitive time-travel.
+
+        Marks the old (subject, predicate, old_obj) triple as ended, adds the
+        new (subject, predicate, new_obj) triple, and creates a provenance
+        link showing the evolution path.
+
+        Example:
+            evolve_fact("Max", "attends", "Lincoln Elementary",
+                        "Westside Middle School", new_valid_from="2026-09-01")
+            → old triple ends today
+            → new triple added from 2026-09-01
+            → provenance triple: max evolved_from_attends lincoln_elementary
+
+        Returns:
+            The new triple's ID.
+
+        Does NOT delete any data — all three triples are kept so the full
+        timeline remains queryable via kg.query_entity(name) and kg.timeline().
+        """
+        ended = date.today().isoformat()
+
+        # 1. Mark old fact as ended
+        self.invalidate(subject, predicate, old_obj, ended=ended)
+
+        # 2. Add the replacement fact
+        new_id = self.add_triple(
+            subject,
+            predicate,
+            new_obj,
+            valid_from=new_valid_from or ended,
+            source_closet=source_closet,
+            source_file=source_file,
+        )
+
+        # 3. Provenance: link new state back to what it replaced.
+        # Predicate "evolved_from_{predicate}" keeps the trail queryable.
+        evolution_pred = f"evolved_from_{predicate.lower().replace(' ', '_')}"
+        self.add_triple(
+            subject,
+            evolution_pred,
+            old_obj,
+            valid_from=ended,
+            source_closet=source_closet,
+        )
+
+        return new_id
+
     # ── Query operations ──────────────────────────────────────────────────
 
     def query_entity(self, name: str, as_of: str = None, direction: str = "outgoing"):

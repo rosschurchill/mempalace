@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-Detailed parameter schemas for all 30 MCP tools.
+Detailed parameter schemas for all 34 MCP tools.
 
 ## Intelligence Tools
 
@@ -29,6 +29,56 @@ Unlike `mempalace_search` (generic unscoped vector search), this tool:
 Each `kg_facts` entry: `{ entity, subject, predicate, object, valid_from, valid_to, current, source_closet }`
 
 Each `results` entry: same as `mempalace_search` results, plus `pipeline_trace` showing scoring breakdown.
+
+---
+
+### `mempalace_whisper`
+
+Proactive context — surfaces the best verbatim memory from each of the top N wings for a query. Unlike `mempalace_search` (global top-N), whisper ensures cross-wing representation so you see relevant context from projects you might not have thought to ask about.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | **Yes** | What to look for |
+| `n_wings` | integer | No | Distinct wings to surface (default 3) |
+
+**Returns:** `{ query, whispers: [{ wing, text, similarity, source_file, room }], total_wings_found }`
+
+---
+
+### `mempalace_socratic`
+
+Generate a Socratic question based on structural holes in the knowledge graph. Finds entities you know exist but haven't explored deeply.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `context_entities` | string[] | No | Current session entities — biases question toward these |
+
+**Returns:** `{ question, entity, reasoning, entity_degree }`
+
+---
+
+### `mempalace_pillars`
+
+Identify cognitive pillars via PageRank over the knowledge graph — the entities everything else references.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `n` | integer | No | Pillars to return (default 5) |
+
+**Returns:** `{ pillars: [{ rank, entity, score }], total_entities, message }`
+
+---
+
+### `mempalace_rem_cycle`
+
+Run a REM (Rapid Entity Mapping) cycle — discover and record semantic bridges between wings. Scans recent drawers, finds cross-wing semantic matches, records them as `semantically_bridges` triples in the knowledge graph.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `n_anchors` | integer | No | Max recent drawers to scan (default 50) |
+| `threshold` | number | No | Cosine distance cap — 0.15 ≈ 85% similarity (default 0.15) |
+
+**Returns:** `{ bridges_created, bridges_skipped_existing, anchors_scanned, wings_involved, runtime_ms }`
 
 ---
 

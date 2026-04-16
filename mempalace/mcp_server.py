@@ -73,6 +73,8 @@ from .palace_graph import (  # noqa: E402
 from .knowledge_graph import KnowledgeGraph  # noqa: E402
 from .explain import run_explain  # noqa: E402
 from .entity_registry import EntityRegistry  # noqa: E402
+from .ambient import get_whisper, get_socratic_question, get_eigen_thoughts  # noqa: E402
+from .rem_cycle import run_rem_cycle  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -1159,6 +1161,80 @@ def tool_memories_filed_away():
 # ==================== SETTINGS TOOLS ====================
 
 
+def tool_whisper(query: str, n_wings: int = 3):
+    """Proactive context — surface the best memory from each of the top N wings.
+
+    Unlike mempalace_search (global top-N results), whisper deliberately ensures
+    representation from multiple wings so you see relevant context from projects
+    you might not have thought to ask about.
+
+    Use at session start or when switching context: "whisper what I know about X"
+    """
+    col = _get_collection()
+    if not col:
+        return _no_palace()
+    try:
+        return get_whisper(query, _config.palace_path, n_wings=max(1, min(n_wings, 10)))
+    except Exception as e:
+        logger.exception("tool_whisper failed")
+        return {"error": str(e), "query": query}
+
+
+def tool_socratic(context_entities: list = None):
+    """Generate a Socratic question based on structural holes in the knowledge graph.
+
+    Finds the entity that's most "underexplored" — present in the KG but with
+    very few relationships relative to how important it seems. When context_entities
+    is provided, biases toward entities relevant to the current session.
+
+    Use when you want to discover what you've forgotten to record.
+    """
+    try:
+        return get_socratic_question(_kg, context_entities=context_entities or [])
+    except Exception as e:
+        logger.exception("tool_socratic failed")
+        return {"error": str(e)}
+
+
+def tool_pillars(n: int = 5):
+    """Identify the top-N cognitive pillars via PageRank over the knowledge graph.
+
+    The highest-PageRank entities are the concepts everything else in your KG
+    references — the load-bearing pillars of your personal knowledge architecture.
+    """
+    try:
+        return get_eigen_thoughts(_kg, n=max(1, min(n, 20)))
+    except Exception as e:
+        logger.exception("tool_pillars failed")
+        return {"error": str(e)}
+
+
+def tool_rem_cycle(n_anchors: int = 50, threshold: float = 0.15):
+    """Run a REM (Rapid Entity Mapping) cycle — discover semantic bridges between wings.
+
+    Scans the N most-recently-filed drawers, finds their semantic neighbors in
+    other wings, and records strong matches as "semantically_bridges" triples in
+    the knowledge graph. These bridges are then traversable by mempalace_explain
+    and mempalace_traverse.
+
+    Run periodically (e.g., after a mining session) to keep the bridge graph fresh.
+    Bounded by n_anchors to prevent O(n²) cost on large palaces.
+    """
+    col = _get_collection()
+    if not col:
+        return _no_palace()
+    try:
+        return run_rem_cycle(
+            palace_path=_config.palace_path,
+            kg=_kg,
+            n_anchors=max(1, min(n_anchors, 500)),
+            threshold=max(0.0, min(threshold, 2.0)),
+        )
+    except Exception as e:
+        logger.exception("tool_rem_cycle failed")
+        return {"error": str(e)}
+
+
 def tool_reconnect():
     """Force the MCP server to drop the cached ChromaDB collection and reconnect.
 
@@ -1266,6 +1342,53 @@ TOOLS = {
             "required": ["query"],
         },
         "handler": tool_explain,
+    },
+    "mempalace_whisper": {
+        "description": "Proactive context — surface the best verbatim memory from each of the top N wings for a query. Unlike search (global top-N), whisper ensures cross-wing representation so you see relevant context from projects you might not have thought to ask about. Use at session start or when switching context.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to look for"},
+                "n_wings": {"type": "integer", "description": "How many distinct wings to surface (default 3)"},
+            },
+            "required": ["query"],
+        },
+        "handler": tool_whisper,
+    },
+    "mempalace_socratic": {
+        "description": "Generate a Socratic question based on structural holes in the knowledge graph — finds entities you know exist but haven't explored deeply. Use when you want to discover what you've forgotten to record. Optionally provide context_entities to bias toward the current session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "context_entities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Entities currently in scope — biases the question toward these (optional)",
+                },
+            },
+        },
+        "handler": tool_socratic,
+    },
+    "mempalace_pillars": {
+        "description": "Identify the top-N cognitive pillars via PageRank over the knowledge graph. These are the entities everything else references — the load-bearing concepts in your personal knowledge architecture.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "description": "How many pillars to return (default 5)"},
+            },
+        },
+        "handler": tool_pillars,
+    },
+    "mempalace_rem_cycle": {
+        "description": "Run a REM (Rapid Entity Mapping) cycle — discover and record semantic bridges between wings. Scans recent drawers, finds strong cross-wing semantic matches, and records them as 'semantically_bridges' triples in the knowledge graph. Run after mining sessions to keep the bridge graph current.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "n_anchors": {"type": "integer", "description": "Max recent drawers to scan (default 50, max 500)"},
+                "threshold": {"type": "number", "description": "Cosine distance threshold — 0.15 ≈ 0.85 similarity (default 0.15, lower = stricter)"},
+            },
+        },
+        "handler": tool_rem_cycle,
     },
     "mempalace_status": {
         "description": "Palace overview — total drawers, wing and room counts",
