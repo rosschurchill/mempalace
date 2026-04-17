@@ -322,13 +322,19 @@ def cmd_repair(args):
     all_ids = []
     all_docs = []
     all_metas = []
+    # #934 item 3: use actual batch size for offset, not the request size.
+    # The old code always advanced by batch_size even when fewer rows came
+    # back (concurrent modification, last page short), permanently skipping
+    # drawers that would then be lost from the rebuild.
     offset = 0
     while offset < total:
         batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
+        if not batch["ids"]:
+            break
         all_ids.extend(batch["ids"])
         all_docs.extend(batch["documents"])
         all_metas.extend(batch["metadatas"])
-        offset += batch_size
+        offset += len(batch["ids"])
     print(f"  Extracted {len(all_ids)} drawers")
 
     # Backup and rebuild
@@ -525,6 +531,19 @@ def cmd_compress(args):
 
 
 def main():
+    # Parent parser — all subparsers inherit --palace so users can write
+    # either `mempalace --palace /x status` OR `mempalace status --palace /x`.
+    # Issue #847: the old top-level-only placement broke the second form.
+    palace_parent = argparse.ArgumentParser(add_help=False)
+    palace_parent.add_argument(
+        "--palace",
+        default=None,
+        help="Where the palace lives (default: from ~/.mempalace/config.json or ~/.mempalace/palace)",
+    )
+
+    # Top-level --palace (pre-subcommand position, e.g. `mempalace --palace /x status`).
+    # Stored under a different dest so the subparser's --palace can also work
+    # without one overwriting the other (#847).
     parser = argparse.ArgumentParser(
         description="MemPalace — Give your AI a memory. No API key required.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -533,10 +552,22 @@ def main():
     parser.add_argument(
         "--palace",
         default=None,
-        help="Where the palace lives (default: from ~/.mempalace/config.json or ~/.mempalace/palace)",
+        dest="_top_palace",
+        help="Where the palace lives (can also be passed after the subcommand)",
     )
 
     sub = parser.add_subparsers(dest="command")
+
+    # Wrap add_parser so every subcommand gets its own --palace too.
+    _original_add_parser = sub.add_parser
+
+    def add_parser_with_palace(name, **kwargs):
+        parents = list(kwargs.pop("parents", []))
+        if palace_parent not in parents:
+            parents.append(palace_parent)
+        return _original_add_parser(name, parents=parents, **kwargs)
+
+    sub.add_parser = add_parser_with_palace
 
     # init
     p_init = sub.add_parser("init", help="Detect rooms from your folder structure")
@@ -708,6 +739,12 @@ def main():
                        help="Cosine distance threshold (default 0.15 ≈ 85%% similarity)")
 
     args = parser.parse_args()
+
+    # Merge top-level --palace into args.palace if subparser didn't set it (#847).
+    # Lets users write either `mempalace --palace /x status` or `mempalace status --palace /x`.
+    top_palace = getattr(args, "_top_palace", None)
+    if top_palace and not getattr(args, "palace", None):
+        args.palace = top_palace
 
     if not args.command:
         parser.print_help()

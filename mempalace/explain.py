@@ -21,6 +21,7 @@ Pipeline:
 """
 
 import re
+import time
 from typing import Optional
 
 
@@ -82,8 +83,26 @@ def _detect_wing(entity_candidates: list, all_wings: set) -> Optional[str]:
     return None
 
 
+# Wings cache — avoids paging the entire palace on every explain() call.
+# Keyed by id(col) since the same collection object is shared across calls
+# within one MCP server session; TTL prevents stale results after mine.
+_WINGS_CACHE: dict = {}
+_WINGS_CACHE_TTL_SECONDS = 30.0
+
+
 def _get_all_wings(col) -> set:
-    """Read distinct wing names from palace metadata (paginated)."""
+    """Read distinct wing names from palace metadata (paginated, cached).
+
+    Without caching this pages through the full collection on every
+    explain() call — O(N) per query on large palaces. The cache has a
+    30-second TTL so it picks up new wings shortly after mining.
+    """
+    key = id(col)
+    now = time.time()
+    cached = _WINGS_CACHE.get(key)
+    if cached and (now - cached[0]) < _WINGS_CACHE_TTL_SECONDS:
+        return cached[1]
+
     wings: set = set()
     try:
         total = col.count()
@@ -100,6 +119,8 @@ def _get_all_wings(col) -> set:
             offset += len(metas)
     except Exception:
         pass
+
+    _WINGS_CACHE[key] = (now, wings)
     return wings
 
 

@@ -260,19 +260,41 @@ def rebuild_index(palace_path=None):
         shutil.copy2(sqlite_path, backup_path)
         print(f"  Backup: {backup_path}")
 
-    # Rebuild with correct HNSW settings
+    # Rebuild with correct HNSW settings.
+    # #934 item 1: if the upsert loop crashed partway (OOM, ChromaDB error,
+    # disk full), the old collection was already gone and remaining drawers
+    # were permanently lost. Now we wrap the rebuild and restore from the
+    # SQLite backup on any failure.
     print("  Rebuilding collection with hnsw:space=cosine...")
     backend.delete_collection(palace_path, COLLECTION_NAME)
     new_col = backend.create_collection(palace_path, COLLECTION_NAME)
 
     filed = 0
-    for i in range(0, len(all_ids), batch_size):
-        batch_ids = all_ids[i : i + batch_size]
-        batch_docs = all_docs[i : i + batch_size]
-        batch_metas = all_metas[i : i + batch_size]
-        new_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
-        filed += len(batch_ids)
-        print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
+    try:
+        for i in range(0, len(all_ids), batch_size):
+            batch_ids = all_ids[i : i + batch_size]
+            batch_docs = all_docs[i : i + batch_size]
+            batch_metas = all_metas[i : i + batch_size]
+            new_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+            filed += len(batch_ids)
+            print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
+    except Exception as e:
+        print(f"\n  ✗ Repair failed after {filed}/{len(all_ids)} drawers: {e}")
+        backup_path = os.path.join(palace_path, "chroma.sqlite3.backup")
+        sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
+        if os.path.exists(backup_path):
+            print(f"  Restoring from backup: {backup_path}")
+            try:
+                # Close any cached clients before file swap
+                shutil.copy2(backup_path, sqlite_path)
+                print("  ✓ SQLite database restored. Run `mempalace status` to verify.")
+            except Exception as restore_err:
+                print(f"  ✗✗ Restore ALSO failed: {restore_err}")
+                print(f"     Backup is still at: {backup_path}")
+                print("     Manually copy it back over chroma.sqlite3 to recover.")
+        else:
+            print(f"  ✗ No backup found at {backup_path} — data may be lost.")
+        raise
 
     print(f"\n  Repair complete. {filed} drawers rebuilt.")
     print("  HNSW index is now clean with cosine distance metric.")

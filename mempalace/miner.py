@@ -726,9 +726,17 @@ def scan_project(
             # Skip symlinks — prevents following links to /dev/urandom, etc.
             if filepath.is_symlink():
                 continue
-            # Skip files exceeding size limit
+            # Skip files exceeding size limit — but log it (issue #923).
+            # Previously these were silently skipped with no counter; users had
+            # no way to know why a file they expected wasn't mined.
             try:
-                if filepath.stat().st_size > MAX_FILE_SIZE:
+                size = filepath.stat().st_size
+                if size > MAX_FILE_SIZE:
+                    import logging as _logging
+                    _logging.getLogger("mempalace").warning(
+                        "Skipping oversized file: %s (%.1f MB > %.0f MB limit)",
+                        filepath, size / 1e6, MAX_FILE_SIZE / 1e6,
+                    )
                     continue
             except OSError:
                 continue
@@ -788,7 +796,7 @@ def mine(
         # Record the embedding model used for this mine so the search path
         # can detect mismatches before returning bad results (issue #903/#912).
         from .config import MempalaceConfig
-        write_palace_meta(palace_path, MempalaceConfig().embedding_model)
+        write_palace_meta(palace_path, MempalaceConfig().embedding_model, col=collection)
     else:
         collection = None
         closets_col = None

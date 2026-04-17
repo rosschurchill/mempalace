@@ -19,10 +19,15 @@ Design constraints:
 - Non-destructive: only adds triples, never modifies existing ones
 """
 
+import concurrent.futures
 import logging
 from datetime import datetime
 
 logger = logging.getLogger("mempalace_mcp")
+
+# Per-query timeout — prevents a single stuck col.query() from stalling the
+# entire REM cycle. Applied via ThreadPoolExecutor.submit(...).result(timeout=).
+_REM_QUERY_TIMEOUT_SECONDS = 10
 
 
 def run_rem_cycle(
@@ -134,74 +139,92 @@ def run_rem_cycle(
     # ── Main scan ─────────────────────────────────────────────────────────────
     bridges_created = 0
     bridges_skipped = 0
+    queries_timed_out = 0
     wings_involved: set = set()
 
-    for anchor in anchors:
-        anchor_doc = anchor["doc"]
-        anchor_meta = anchor["meta"]
-        anchor_id = anchor["id"]
-        anchor_wing = anchor_meta.get("wing", "")
+    # One executor reused across the loop — cheaper than spawning a thread
+    # per query when the scan is large.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-        if not anchor_wing or not anchor_doc:
-            continue
+    try:
+        for anchor in anchors:
+            anchor_doc = anchor["doc"]
+            anchor_meta = anchor["meta"]
+            anchor_id = anchor["id"]
+            anchor_wing = anchor_meta.get("wing", "")
 
-        try:
-            # Query for semantic neighbors in a DIFFERENT wing
-            # ChromaDB's $ne operator filters out the anchor's own wing
-            results = col.query(
-                query_texts=[anchor_doc],
-                n_results=3,
-                where={"wing": {"$ne": anchor_wing}},
-                include=["metadatas", "distances"],
-            )
-        except Exception:
-            continue
-
-        distances = results.get("distances") or [[]]
-        metadatas = results.get("metadatas") or [[]]
-        if not distances or not distances[0]:
-            continue
-
-        for dist, meta in zip(distances[0], metadatas[0]):
-            if dist is None or dist > threshold:
-                continue
-            neighbor_wing = (meta or {}).get("wing", "")
-            if not neighbor_wing or neighbor_wing == anchor_wing:
+            if not anchor_wing or not anchor_doc:
                 continue
 
-            # Derive canonical entity IDs (same as KG._entity_id)
-            src_id = anchor_wing.lower().replace(" ", "_").replace("'", "")
-            dst_id = neighbor_wing.lower().replace(" ", "_").replace("'", "")
-
-            if (src_id, dst_id) in existing_bridges:
-                bridges_skipped += 1
-                continue
-
-            # Create the bridge triple
+            # Per-query timeout guard — one slow/stuck col.query() shouldn't
+            # stall the entire REM cycle.
             try:
-                kg.add_triple(
-                    anchor_wing,
-                    "semantically_bridges",
-                    neighbor_wing,
-                    source_closet=anchor_id,
-                    confidence=round(1.0 - dist, 3),
+                future = executor.submit(
+                    col.query,
+                    query_texts=[anchor_doc],
+                    n_results=3,
+                    where={"wing": {"$ne": anchor_wing}},
+                    include=["metadatas", "distances"],
                 )
-                existing_bridges.add((src_id, dst_id))
-                existing_bridges.add((dst_id, src_id))
-                bridges_created += 1
-                wings_involved.add(anchor_wing)
-                wings_involved.add(neighbor_wing)
-                logger.info(
-                    "REM bridge: %s ↔ %s (dist=%.3f)", anchor_wing, neighbor_wing, dist
+                results = future.result(timeout=_REM_QUERY_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                queries_timed_out += 1
+                logger.warning(
+                    "REM query timed out after %ds for anchor %s — skipping",
+                    _REM_QUERY_TIMEOUT_SECONDS, anchor_id,
                 )
+                continue
             except Exception:
-                pass  # Never let a failed bridge abort the cycle
+                continue
+
+            distances = results.get("distances") or [[]]
+            metadatas = results.get("metadatas") or [[]]
+            if not distances or not distances[0]:
+                continue
+
+            for dist, meta in zip(distances[0], metadatas[0]):
+                if dist is None or dist > threshold:
+                    continue
+                neighbor_wing = (meta or {}).get("wing", "")
+                if not neighbor_wing or neighbor_wing == anchor_wing:
+                    continue
+
+                # Derive canonical entity IDs (same as KG._entity_id)
+                src_id = anchor_wing.lower().replace(" ", "_").replace("'", "")
+                dst_id = neighbor_wing.lower().replace(" ", "_").replace("'", "")
+
+                if (src_id, dst_id) in existing_bridges:
+                    bridges_skipped += 1
+                    continue
+
+                # Create the bridge triple
+                try:
+                    kg.add_triple(
+                        anchor_wing,
+                        "semantically_bridges",
+                        neighbor_wing,
+                        source_closet=anchor_id,
+                        confidence=round(1.0 - dist, 3),
+                    )
+                    existing_bridges.add((src_id, dst_id))
+                    existing_bridges.add((dst_id, src_id))
+                    bridges_created += 1
+                    wings_involved.add(anchor_wing)
+                    wings_involved.add(neighbor_wing)
+                    logger.info(
+                        "REM bridge: %s ↔ %s (dist=%.3f)", anchor_wing, neighbor_wing, dist
+                    )
+                except Exception:
+                    pass  # Never let a failed bridge abort the cycle
+    finally:
+        executor.shutdown(wait=False)
 
     runtime_ms = int((datetime.now() - start).total_seconds() * 1000)
 
     return {
         "bridges_created": bridges_created,
         "bridges_skipped_existing": bridges_skipped,
+        "queries_timed_out": queries_timed_out,
         "anchors_scanned": len(anchors),
         "wings_involved": sorted(wings_involved),
         "runtime_ms": runtime_ms,

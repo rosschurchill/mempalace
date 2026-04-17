@@ -168,8 +168,17 @@ def _maybe_auto_ingest(transcript_path: str = ""):
         pass
 
 
+_MINE_SYNC_TIMEOUT_SECONDS = 60
+
+
 def _mine_sync(transcript_path: str = ""):
-    """Run mempalace mine synchronously (for precompact -- data must land first)."""
+    """Run mempalace mine synchronously (for precompact -- data must land first).
+
+    On timeout, logs the failure explicitly (#906/#941/#949 — the old behaviour
+    silently swallowed timeouts, masking data loss as success). The hook still
+    returns {} so compaction isn't blocked, but the user can inspect hook.log
+    to see when mining failed to complete in the allotted window.
+    """
     mine_dir = _get_mine_dir(transcript_path)
     if not mine_dir:
         return
@@ -181,10 +190,16 @@ def _mine_sync(transcript_path: str = ""):
                 [sys.executable, "-m", "mempalace", "mine", mine_dir],
                 stdout=log_f,
                 stderr=log_f,
-                timeout=60,
+                timeout=_MINE_SYNC_TIMEOUT_SECONDS,
             )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    except subprocess.TimeoutExpired:
+        _log(
+            f"WARNING: _mine_sync timed out after {_MINE_SYNC_TIMEOUT_SECONDS}s "
+            f"on {mine_dir} — transcript NOT fully mined before compaction. "
+            "Some session content may be lost from the palace."
+        )
+    except OSError as e:
+        _log(f"WARNING: _mine_sync failed with OSError: {e}")
 
 
 SUPPORTED_HARNESSES = {"claude-code", "codex"}

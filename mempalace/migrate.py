@@ -229,10 +229,24 @@ def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
     del col
     del fresh_backend
 
-    # Swap: remove old palace, move new one into place
-    print("  Swapping old palace for migrated version...")
-    shutil.rmtree(palace_path)
-    shutil.move(temp_palace, palace_path)
+    # #934 item 2: atomic swap. The old code did rmtree + move in two steps —
+    # if the process died between them, both old and new were gone.
+    # os.rename is atomic on the same filesystem (POSIX guarantee), so a
+    # crash at any point leaves either the old palace or the new one intact.
+    print("  Swapping old palace for migrated version (atomic)...")
+    old_staging = palace_path + ".old"
+    # If a prior crashed migration left .old behind, remove it first
+    if os.path.exists(old_staging):
+        shutil.rmtree(old_staging)
+    os.rename(palace_path, old_staging)       # 1. move live palace aside
+    try:
+        os.rename(temp_palace, palace_path)    # 2. move new palace into place
+    except OSError:
+        # Roll back — new palace couldn't be placed, restore live palace
+        os.rename(old_staging, palace_path)
+        raise
+    # Both renames succeeded — safe to delete the old palace now
+    shutil.rmtree(old_staging)
 
     print("\n  Migration complete.")
     print(f"  Drawers migrated: {final_count}")

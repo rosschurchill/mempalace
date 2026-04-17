@@ -969,6 +969,9 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
     try:
         agent_name = sanitize_name(agent_name, "agent_name")
         entry = sanitize_content(entry)
+        # #934 item 4: topic flowed unsanitized into ChromaDB metadata.
+        # Same constraint as other names — path traversal chars, nulls, etc.
+        topic = sanitize_name(topic, "topic")
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
@@ -1252,10 +1255,16 @@ def tool_reconnect():
     Use after external scripts or CLI commands modify the palace database
     directly, which can leave the in-memory HNSW index stale.
     """
+    # #934 item 6: reconnect was not resetting the metadata cache, so
+    # _get_cached_metadata could return stale values for up to 5s (TTL)
+    # after an external write. Reset all 6 globals to match _get_client().
     global _collection_cache, _palace_db_inode, _palace_db_mtime
+    global _metadata_cache, _metadata_cache_time
     _collection_cache = None
     _palace_db_inode = 0
     _palace_db_mtime = 0.0
+    _metadata_cache = None
+    _metadata_cache_time = 0
     try:
         col = _get_collection()
         if col is None:

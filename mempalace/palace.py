@@ -21,19 +21,35 @@ from .backends.chroma import ChromaBackend
 _PALACE_META_FILE = "palace_meta.json"
 
 
-def write_palace_meta(palace_path: str, embedding_model: str) -> None:
-    """Write embedding model metadata to <palace_path>/palace_meta.json.
+def write_palace_meta(palace_path: str, embedding_model: str, col=None) -> None:
+    """Record embedding model at mine time for drift detection (#903/#912).
 
-    Called once per mine run. Idempotent — overwrites on each run so the
-    file always reflects the most recent ingest model.
+    Writes to BOTH (when both targets are reachable):
+      1. ChromaDB collection metadata (authoritative — works in both HTTP and
+         embedded modes, survives palace moves, readable by any client).
+      2. <palace_path>/palace_meta.json (embedded mode only — local cache so
+         status/repair tools can read model info without opening the collection).
 
-    HTTP mode (MEMPALACE_CHROMA_URL set): no-op. The server holds the data;
-    there is no local palace directory to write metadata into.
+    Callers that already have an open collection should pass it as ``col`` to
+    avoid an extra get_collection round-trip. When ``col`` is None, this
+    function opens the collection itself (create=True — same behaviour as
+    the miner which is the primary caller).
+
+    HTTP mode: only #1 happens. Both writes are idempotent and non-fatal.
     """
-    import os as _os
-    if _os.environ.get("MEMPALACE_CHROMA_URL"):
-        return
+    http_mode = bool(os.environ.get("MEMPALACE_CHROMA_URL"))
+    now = datetime.now().isoformat()
 
+    # 1. Write to ChromaDB collection metadata (source of truth)
+    try:
+        target_col = col if col is not None else get_collection(palace_path, create=True)
+        target_col.set_metadata(embedding_model=embedding_model, last_mined=now)
+    except Exception:
+        pass  # non-fatal — metadata write failure must never abort a mine run
+
+    # 2. Local cache file — embedded mode only
+    if http_mode:
+        return
     meta_path = Path(palace_path) / _PALACE_META_FILE
     try:
         existing: dict = {}
@@ -43,18 +59,41 @@ def write_palace_meta(palace_path: str, embedding_model: str) -> None:
             except (json.JSONDecodeError, OSError):
                 existing = {}
         existing["embedding_model"] = embedding_model
-        existing["last_mined"] = datetime.now().isoformat()
+        existing["last_mined"] = now
         meta_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
         try:
             meta_path.chmod(0o600)
         except (OSError, NotImplementedError):
             pass
     except OSError:
-        pass  # non-fatal — metadata write failure must never abort a mine run
+        pass
 
 
-def read_palace_meta(palace_path: str) -> dict:
-    """Read palace_meta.json; return {} if missing or corrupt."""
+def read_palace_meta(palace_path: str, col=None) -> dict:
+    """Read palace metadata.
+
+    When ``col`` is provided (an already-opened ChromaCollection), its metadata
+    is the source of truth — works in both HTTP and embedded modes, survives
+    palace relocation. Callers that have already loaded the collection should
+    always pass it.
+
+    When ``col`` is None, falls back to reading palace_meta.json (embedded mode
+    only — HTTP deployments don't have a local file).
+
+    Returns {} if no metadata is found.
+    """
+    # 1. Collection metadata (authoritative when available)
+    if col is not None:
+        try:
+            meta = col.metadata
+            relevant = {k: v for k, v in meta.items() if k in ("embedding_model", "last_mined")}
+            if relevant:
+                return relevant
+        except Exception:
+            pass
+
+    # 2. Fall back to local file (embedded mode, legacy palaces, callers
+    #    that don't have a collection handy like status-check CLI paths)
     meta_path = Path(palace_path) / _PALACE_META_FILE
     if not meta_path.is_file():
         return {}

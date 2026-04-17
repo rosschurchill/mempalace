@@ -29,7 +29,19 @@ from .base import BaseCollection
 # and-suspenders — the env var covers C-level telemetry before Python sees it.
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
-_CHROMA_SETTINGS = Settings(anonymized_telemetry=False)
+
+def _chroma_settings() -> Settings:
+    """Return a fresh Settings instance.
+
+    IMPORTANT: Do not share Settings across HttpClient / PersistentClient
+    calls. ChromaDB mutates the Settings object during client init — HttpClient
+    writes chroma_server_host/port into it, and a subsequent PersistentClient
+    using the same object will see those host fields and silently switch to
+    HTTP mode (failing with "Could not connect to a Chroma server" even when
+    MEMPALACE_CHROMA_URL is unset). Every call creates a fresh object.
+    """
+    return Settings(anonymized_telemetry=False)
+
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +66,7 @@ def _get_http_client():
         port=port,
         ssl=ssl,
         headers=headers,
-        settings=_CHROMA_SETTINGS,
+        settings=_chroma_settings(),
     )
 
 
@@ -117,6 +129,27 @@ class ChromaCollection(BaseCollection):
     def count(self):
         return self._collection.count()
 
+    @property
+    def metadata(self) -> dict:
+        """Collection-level metadata (includes hnsw:space and palace config)."""
+        return dict(self._collection.metadata or {})
+
+    def set_metadata(self, **updates) -> None:
+        """Merge updates into collection-level metadata (non-hnsw keys only).
+
+        ChromaDB's ``modify(metadata=...)`` rejects any ``hnsw:*`` keys —
+        the distance function is immutable after creation. We strip those
+        keys before passing the merged dict, so user-level keys (like
+        ``embedding_model``) are preserved while core hnsw config is left alone.
+
+        Used to record embedding model info at mine time so searchers can
+        detect model drift (issue #903/#912).
+        """
+        current = self.metadata
+        current.update(updates)
+        mutable = {k: v for k, v in current.items() if not k.startswith("hnsw:")}
+        self._collection.modify(metadata=mutable)
+
 
 class ChromaBackend:
     """Factory for MemPalace's default ChromaDB backend."""
@@ -146,7 +179,7 @@ class ChromaBackend:
         if palace_path not in self._clients:
             _fix_blob_seq_ids(palace_path)
             self._clients[palace_path] = chromadb.PersistentClient(
-                path=palace_path, settings=_CHROMA_SETTINGS
+                path=palace_path, settings=_chroma_settings()
             )
         return self._clients[palace_path]
 
@@ -168,7 +201,7 @@ class ChromaBackend:
         if os.environ.get("MEMPALACE_CHROMA_URL"):
             return _get_http_client()
         _fix_blob_seq_ids(palace_path)
-        return chromadb.PersistentClient(path=palace_path, settings=_CHROMA_SETTINGS)
+        return chromadb.PersistentClient(path=palace_path, settings=_chroma_settings())
 
     @staticmethod
     def backend_version() -> str:

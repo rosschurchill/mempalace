@@ -443,7 +443,7 @@ def search_memories(  # noqa: C901
     # vectors live in a different space than stored vectors — cosine similarity
     # is mathematically meaningless and results will be garbage.
     _embedding_warning = None
-    meta = read_palace_meta(palace_path)
+    meta = read_palace_meta(palace_path, col=drawers_col)
     if meta:
         from .config import MempalaceConfig
         current_model = MempalaceConfig().embedding_model

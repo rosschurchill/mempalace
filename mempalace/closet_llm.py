@@ -160,6 +160,11 @@ def _call_llm(cfg: LLMConfig, source_file: str, wing: str, room: str, content: s
             parsed = json.loads(text)
             return parsed, payload.get("usage")
         except json.JSONDecodeError:
+            # #934 item 5: LLM responses are non-deterministic. A single malformed
+            # response should retry, not permanently skip the source file.
+            if attempt < 2:
+                time.sleep(2**attempt)
+                continue
             return None, None
         except urllib.error.HTTPError as e:
             # 429 / 503 = retry with backoff

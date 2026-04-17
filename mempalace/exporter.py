@@ -48,7 +48,19 @@ def export_palace(palace_path: str, output_dir: str, format: str = "markdown") -
         print("  Palace is empty — nothing to export.")
         return {"wings": 0, "rooms": 0, "drawers": 0}
 
+    # #934 item 7: defend against pre-placed symlinks at the output location.
+    # If an attacker seeds a symlink, makedirs would follow it and write
+    # export data into attacker-controlled directories.
     os.makedirs(output_dir, exist_ok=True)
+    real_output = os.path.realpath(output_dir)
+    if real_output != os.path.realpath(os.path.abspath(output_dir)):
+        # Should never happen because realpath is idempotent, but belt-and-suspenders
+        raise ValueError(f"Output path resolves unexpectedly: {output_dir} -> {real_output}")
+    if os.path.islink(output_dir):
+        raise ValueError(
+            f"Refusing to export into symlinked directory: {output_dir}. "
+            "Delete the symlink or choose a different --output path."
+        )
     try:
         os.chmod(output_dir, 0o700)
     except (OSError, NotImplementedError):
@@ -89,6 +101,11 @@ def export_palace(palace_path: str, output_dir: str, format: str = "markdown") -
             safe_wing = _safe_path_component(wing)
             wing_dir = os.path.join(output_dir, safe_wing)
             if wing_dir not in created_wing_dirs:
+                # #934 item 7: reject symlinked wing directories
+                if os.path.islink(wing_dir):
+                    raise ValueError(
+                        f"Refusing to write to symlinked wing dir: {wing_dir}"
+                    )
                 os.makedirs(wing_dir, exist_ok=True)
                 try:
                     os.chmod(wing_dir, 0o700)
