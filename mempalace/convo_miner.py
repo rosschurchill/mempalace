@@ -22,6 +22,7 @@ from .palace import (
     file_already_mined,
     get_collection,
     mine_lock,
+    upsert_in_batches,
 )
 
 
@@ -325,34 +326,34 @@ def _file_chunks_locked(collection, source_file, chunks, wing, room, agent, extr
         except Exception:
             pass
 
+        # Build records first, then batch-upsert. Prior per-chunk upsert in a
+        # loop paid one HTTP round-trip per chunk in Phase-5 remote mode;
+        # batching collapses that to ⌈N/100⌉ calls.
+        ids: list = []
+        docs: list = []
+        metas: list = []
         for chunk in chunks:
             chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
             if extract_mode == "general":
                 room_counts_delta[chunk_room] += 1
             drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
-            try:
-                collection.upsert(
-                    documents=[chunk["content"]],
-                    ids=[drawer_id],
-                    metadatas=[
-                        {
-                            "wing": wing,
-                            "room": chunk_room,
-                            "hall": _detect_hall_cached(chunk["content"]),
-                            "source_file": source_file,
-                            "chunk_index": chunk["chunk_index"],
-                            "added_by": agent,
-                            "filed_at": datetime.now().isoformat(),
-                            "ingest_mode": "convos",
-                            "extract_mode": extract_mode,
-                            "normalize_version": NORMALIZE_VERSION,
-                        }
-                    ],
-                )
-                drawers_added += 1
-            except Exception as e:
-                if "already exists" not in str(e).lower():
-                    raise
+            ids.append(drawer_id)
+            docs.append(chunk["content"])
+            metas.append(
+                {
+                    "wing": wing,
+                    "room": chunk_room,
+                    "hall": _detect_hall_cached(chunk["content"]),
+                    "source_file": source_file,
+                    "chunk_index": chunk["chunk_index"],
+                    "added_by": agent,
+                    "filed_at": datetime.now().isoformat(),
+                    "ingest_mode": "convos",
+                    "extract_mode": extract_mode,
+                    "normalize_version": NORMALIZE_VERSION,
+                }
+            )
+        drawers_added = upsert_in_batches(collection, ids, docs, metas)
     return drawers_added, room_counts_delta, False
 
 

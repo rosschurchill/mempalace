@@ -25,6 +25,7 @@ from .palace import (
     mine_lock,
     purge_file_closets,
     upsert_closet_lines,
+    upsert_in_batches,
     write_palace_meta,
 )
 
@@ -532,40 +533,47 @@ def _extract_entities_for_metadata(content: str) -> str:
     return ";".join(capped)
 
 
+def _build_drawer_record(
+    wing: str, room: str, content: str, source_file: str, chunk_index: int, agent: str
+):
+    """Build (drawer_id, content, metadata) for a single chunk.
+
+    Pulled out so process_file can collect records and batch the upsert.
+    """
+    drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(chunk_index)).encode()).hexdigest()[:24]}"
+    metadata = {
+        "wing": wing,
+        "room": room,
+        "source_file": source_file,
+        "chunk_index": chunk_index,
+        "added_by": agent,
+        "filed_at": datetime.now().isoformat(),
+        "normalize_version": NORMALIZE_VERSION,
+    }
+    try:
+        metadata["source_mtime"] = os.path.getmtime(source_file)
+    except OSError:
+        pass
+    metadata["hall"] = detect_hall(content)
+    entities = _extract_entities_for_metadata(content)
+    if entities:
+        metadata["entities"] = entities
+    return drawer_id, content, metadata
+
+
 def add_drawer(
     collection, wing: str, room: str, content: str, source_file: str, chunk_index: int, agent: str
 ):
-    """Add one drawer to the palace."""
-    drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(chunk_index)).encode()).hexdigest()[:24]}"
-    try:
-        metadata = {
-            "wing": wing,
-            "room": room,
-            "source_file": source_file,
-            "chunk_index": chunk_index,
-            "added_by": agent,
-            "filed_at": datetime.now().isoformat(),
-            "normalize_version": NORMALIZE_VERSION,
-        }
-        # Store file mtime so we can detect modifications later.
-        try:
-            metadata["source_mtime"] = os.path.getmtime(source_file)
-        except OSError:
-            pass
-        # Tag with hall for graph connectivity within wings
-        metadata["hall"] = detect_hall(content)
-        # Tag with entity names for filterable search
-        entities = _extract_entities_for_metadata(content)
-        if entities:
-            metadata["entities"] = entities
-        collection.upsert(
-            documents=[content],
-            ids=[drawer_id],
-            metadatas=[metadata],
-        )
-        return True
-    except Exception:
-        raise
+    """Add one drawer to the palace.
+
+    Single-chunk path. For many chunks from one file prefer building records
+    via _build_drawer_record and calling upsert_in_batches directly.
+    """
+    drawer_id, doc, meta = _build_drawer_record(
+        wing, room, content, source_file, chunk_index, agent
+    )
+    collection.upsert(documents=[doc], ids=[drawer_id], metadatas=[meta])
+    return True
 
 
 # =============================================================================
@@ -624,10 +632,10 @@ def process_file(
         except Exception:
             pass
 
-        drawers_added = 0
-        for chunk in chunks:
-            added = add_drawer(
-                collection=collection,
+        # Build all drawer records up front, then batch-upsert. On HTTP-mode
+        # ChromaDB (Phase 5) this collapses N round-trips into ⌈N/100⌉.
+        records = [
+            _build_drawer_record(
                 wing=wing,
                 room=room,
                 content=chunk["content"],
@@ -635,8 +643,12 @@ def process_file(
                 chunk_index=chunk["chunk_index"],
                 agent=agent,
             )
-            if added:
-                drawers_added += 1
+            for chunk in chunks
+        ]
+        ids = [r[0] for r in records]
+        docs = [r[1] for r in records]
+        metas = [r[2] for r in records]
+        drawers_added = upsert_in_batches(collection, ids, docs, metas)
 
         # Build closet — the searchable index pointing to these drawers.
         # Purge first: a re-mine (mtime change or normalize_version bump) must
@@ -733,9 +745,12 @@ def scan_project(
                 size = filepath.stat().st_size
                 if size > MAX_FILE_SIZE:
                     import logging as _logging
+
                     _logging.getLogger("mempalace").warning(
                         "Skipping oversized file: %s (%.1f MB > %.0f MB limit)",
-                        filepath, size / 1e6, MAX_FILE_SIZE / 1e6,
+                        filepath,
+                        size / 1e6,
+                        MAX_FILE_SIZE / 1e6,
                     )
                     continue
             except OSError:
@@ -796,6 +811,7 @@ def mine(
         # Record the embedding model used for this mine so the search path
         # can detect mismatches before returning bad results (issue #903/#912).
         from .config import MempalaceConfig
+
         write_palace_meta(palace_path, MempalaceConfig().embedding_model, col=collection)
     else:
         collection = None

@@ -102,6 +102,7 @@ def read_palace_meta(palace_path: str, col=None) -> dict:
     except (json.JSONDecodeError, OSError):
         return {}
 
+
 SKIP_DIRS = {
     ".git",
     "node_modules",
@@ -291,6 +292,31 @@ def purge_file_closets(closets_col, source_file: str) -> None:
         closets_col.delete(where={"source_file": source_file})
     except Exception:
         pass
+
+
+# Cap per-call payload so a single upsert never balloons in HTTP-mode (one
+# round-trip per chunk was the prior pathology) and to keep the embedder's
+# working set bounded on local mode. Tuned conservatively — ChromaDB accepts
+# larger batches but we hit diminishing returns past ~100.
+DRAWER_UPSERT_BATCH_SIZE = 100
+
+
+def upsert_in_batches(collection, ids, documents, metadatas, batch_size=DRAWER_UPSERT_BATCH_SIZE):
+    """Upsert in batches of ≤batch_size. Returns total count written.
+
+    Collapses N per-chunk round-trips into ⌈N/batch_size⌉ — material on the
+    HTTP backend (Phase 5) where each call is a network call.
+    """
+    n = len(ids)
+    if not (len(documents) == n and len(metadatas) == n):
+        raise ValueError("ids, documents, metadatas must be the same length")
+    for i in range(0, n, batch_size):
+        collection.upsert(
+            documents=documents[i : i + batch_size],
+            ids=ids[i : i + batch_size],
+            metadatas=metadatas[i : i + batch_size],
+        )
+    return n
 
 
 def upsert_closet_lines(closets_col, closet_id_base, lines, metadata):

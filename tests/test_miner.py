@@ -399,3 +399,83 @@ def test_add_drawer_stamps_normalize_version(tmp_path):
         assert meta["normalize_version"] == NORMALIZE_VERSION
     finally:
         del col, client
+
+
+class _UpsertRecorder:
+    """Captures upsert/delete/get calls. Enough stub for process_file."""
+
+    def __init__(self):
+        self.upserts: list = []
+        self.deletes: list = []
+
+    def get(self, **kwargs):
+        return {"ids": [], "metadatas": []}
+
+    def delete(self, **kwargs):
+        self.deletes.append(kwargs)
+
+    def upsert(self, *, documents, ids, metadatas):
+        self.upserts.append(
+            {"documents": list(documents), "ids": list(ids), "metadatas": list(metadatas)}
+        )
+
+
+def test_upsert_in_batches_splits_into_fixed_size_calls():
+    from mempalace.palace import DRAWER_UPSERT_BATCH_SIZE, upsert_in_batches
+
+    fake = _UpsertRecorder()
+    n = DRAWER_UPSERT_BATCH_SIZE * 2 + 50
+    ids = [f"id_{i}" for i in range(n)]
+    docs = [f"doc_{i}" for i in range(n)]
+    metas = [{"i": i} for i in range(n)]
+
+    written = upsert_in_batches(fake, ids, docs, metas)
+
+    assert written == n
+    assert len(fake.upserts) == 3
+    assert [len(c["ids"]) for c in fake.upserts] == [
+        DRAWER_UPSERT_BATCH_SIZE,
+        DRAWER_UPSERT_BATCH_SIZE,
+        50,
+    ]
+    # All ids preserved across batches, in order
+    merged = [i for c in fake.upserts for i in c["ids"]]
+    assert merged == ids
+
+
+def test_process_file_batches_upserts_for_large_file(tmp_path):
+    """Many chunks → upsert called in batches, not per-chunk.
+
+    Regression guard: Phase 5 remote ChromaDB otherwise paid one HTTP RTT
+    per chunk, which made mining large files visibly slow.
+    """
+    from mempalace.miner import process_file
+    from mempalace.palace import DRAWER_UPSERT_BATCH_SIZE
+
+    # 250 paragraphs each big enough to survive MIN_CHUNK_SIZE after strip.
+    paragraphs = ["word " * 200 for _ in range(250)]
+    src = tmp_path / "big.md"
+    src.write_text("\n\n".join(paragraphs), encoding="utf-8")
+
+    fake = _UpsertRecorder()
+    drawers, _room = process_file(
+        filepath=src,
+        project_path=tmp_path,
+        collection=fake,
+        wing="w",
+        rooms=[],
+        agent="t",
+        dry_run=False,
+    )
+
+    assert drawers > DRAWER_UPSERT_BATCH_SIZE, (
+        "test expects >batch_size chunks to exercise batching"
+    )
+    expected_calls = (drawers + DRAWER_UPSERT_BATCH_SIZE - 1) // DRAWER_UPSERT_BATCH_SIZE
+    assert len(fake.upserts) == expected_calls
+    for call in fake.upserts:
+        assert len(call["ids"]) <= DRAWER_UPSERT_BATCH_SIZE
+    # Every drawer id is written exactly once
+    merged = [i for c in fake.upserts for i in c["ids"]]
+    assert len(merged) == drawers
+    assert len(set(merged)) == drawers
