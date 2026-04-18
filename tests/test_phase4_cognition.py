@@ -110,6 +110,52 @@ def test_pagerank_single_entity(tmp_path):
     assert abs(ranked[0]["score"] - 1.0) < 0.01
 
 
+def test_pagerank_disconnected_graph(tmp_path):
+    """Two disconnected components — both should get non-zero scores."""
+    g = KnowledgeGraph(db_path=str(tmp_path / "k.sqlite3"))
+    # Component 1: Alice → Bob
+    g.add_triple("Alice", "knows", "Bob")
+    # Component 2: Carol → Dave (no connection to comp 1)
+    g.add_triple("Carol", "knows", "Dave")
+    ranked = pagerank(g)
+    g.close()
+    names = {r["entity"] for r in ranked}
+    assert names == {"Alice", "Bob", "Carol", "Dave"}
+    for r in ranked:
+        assert r["score"] > 0.0
+    total = sum(r["score"] for r in ranked)
+    assert abs(total - 1.0) < 0.01
+
+
+def test_pagerank_cycle_only(tmp_path):
+    """Pure cycle A→B→C→A — scores should be roughly equal (dangling-free)."""
+    g = KnowledgeGraph(db_path=str(tmp_path / "k.sqlite3"))
+    g.add_triple("A", "links", "B")
+    g.add_triple("B", "links", "C")
+    g.add_triple("C", "links", "A")
+    ranked = pagerank(g)
+    g.close()
+    assert len(ranked) == 3
+    scores = [r["score"] for r in ranked]
+    # All scores should be close to each other (within 10%)
+    assert max(scores) - min(scores) < 0.1
+    assert abs(sum(scores) - 1.0) < 0.01
+
+
+def test_pagerank_self_loop(tmp_path):
+    """Self-loop (A→A) should not crash and still sum to ~1."""
+    g = KnowledgeGraph(db_path=str(tmp_path / "k.sqlite3"))
+    g.add_triple("Looper", "references", "Looper")
+    g.add_triple("Other", "knows", "Looper")
+    ranked = pagerank(g)
+    g.close()
+    assert len(ranked) == 2
+    names = {r["entity"] for r in ranked}
+    assert "Looper" in names
+    total = sum(r["score"] for r in ranked)
+    assert abs(total - 1.0) < 0.01
+
+
 # ── KG evolve_fact ────────────────────────────────────────────────────────────
 
 def test_evolve_fact_basic(kg):
