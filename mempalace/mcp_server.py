@@ -446,6 +446,8 @@ def tool_search(
     max_distance: float = 1.5,
     min_similarity: float = None,
     context: str = None,
+    since: str = None,
+    until: str = None,
 ):
     limit = max(1, min(limit, _MAX_RESULTS))
     try:
@@ -466,6 +468,8 @@ def tool_search(
         room=room,
         n_results=limit,
         max_distance=dist,
+        since=since,
+        until=until,
     )
     # Attach sanitizer metadata for transparency
     if sanitized["was_sanitized"]:
@@ -1639,6 +1643,14 @@ TOOLS = {
                 "context": {
                     "type": "string",
                     "description": "Background context for the search (optional). NOT used for embedding — only for future re-ranking.",
+                },
+                "since": {
+                    "type": "string",
+                    "description": "ISO 8601 date — only return drawers filed on or after this date (e.g. '2025-06-01').",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO 8601 date — only return drawers filed on or before this date (e.g. '2025-12-31').",
                 },
             },
             "required": ["query"],

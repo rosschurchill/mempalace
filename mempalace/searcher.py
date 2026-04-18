@@ -250,15 +250,33 @@ def _hybrid_rank(
     return results
 
 
-def build_where_filter(wing: str = None, room: str = None) -> dict:
-    """Build ChromaDB where filter for wing/room filtering."""
-    if wing and room:
-        return {"$and": [{"wing": wing}, {"room": room}]}
-    elif wing:
-        return {"wing": wing}
-    elif room:
-        return {"room": room}
-    return {}
+def build_where_filter(
+    wing: str = None,
+    room: str = None,
+    since: str = None,
+    until: str = None,
+) -> dict:
+    """Build ChromaDB where filter for wing/room/date filtering.
+
+    since/until accept ISO 8601 date strings (e.g. "2025-06-01"). Both are
+    compared against the ``filed_at`` metadata field using lexicographic order,
+    which is correct because ISO 8601 strings sort chronologically.
+    """
+    clauses: list = []
+    if wing:
+        clauses.append({"wing": wing})
+    if room:
+        clauses.append({"room": room})
+    if since:
+        clauses.append({"filed_at": {"$gte": since}})
+    if until:
+        clauses.append({"filed_at": {"$lte": until}})
+
+    if not clauses:
+        return {}
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
 
 
 def _extract_drawer_ids_from_closet(closet_doc: str) -> list:
@@ -413,6 +431,8 @@ def search_memories(  # noqa: C901
     max_distance: float = 0.0,
     mmr_lambda: float = 0.6,
     cross_wing_balance: bool = True,
+    since: str = None,
+    until: str = None,
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -428,6 +448,10 @@ def search_memories(  # noqa: C901
             cosine distance (hnsw:space=cosine) — 0 = identical, 2 = opposite.
             Results with distance > this value are filtered out. A value of
             0.0 disables filtering. Typical useful range: 0.3–1.0.
+        since: ISO 8601 date string — only return drawers filed on or after
+            this date (e.g. "2025-06-01"). Compared against ``filed_at``.
+        until: ISO 8601 date string — only return drawers filed on or before
+            this date (e.g. "2025-12-31"). Compared against ``filed_at``.
     """
     try:
         drawers_col = get_collection(palace_path, create=False)
@@ -456,7 +480,7 @@ def search_memories(  # noqa: C901
             )
             logger.warning(_embedding_warning)
 
-    where = build_where_filter(wing, room)
+    where = build_where_filter(wing, room, since=since, until=until)
 
     # Hybrid retrieval: always query drawers directly (the floor), then use
     # closet hits to boost rankings. Closets are a ranking SIGNAL, never a

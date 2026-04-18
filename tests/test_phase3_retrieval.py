@@ -3,7 +3,7 @@ pipeline_trace, and the explain pipeline."""
 
 from unittest.mock import MagicMock
 
-from mempalace.searcher import mmr_rerank, _jaccard_sim, _cross_wing_balance
+from mempalace.searcher import mmr_rerank, _jaccard_sim, _cross_wing_balance, build_where_filter
 from mempalace.explain import (
     _extract_candidates,
     _detect_wing,
@@ -392,3 +392,84 @@ def test_run_explain_no_fallback_when_scoped_has_hits(tmp_path, monkeypatch):
     assert "scope_fallback" not in result
     assert "wing_scope_attempted" not in result
     assert result["wing_scope"] == "wing_orion"
+
+
+# ── Date/time filtering (#9.4) ────────────────────────────────────────────────
+
+
+def test_build_where_filter_since_only():
+    f = build_where_filter(since="2025-06-01")
+    assert f == {"filed_at": {"$gte": "2025-06-01"}}
+
+
+def test_build_where_filter_until_only():
+    f = build_where_filter(until="2025-12-31")
+    assert f == {"filed_at": {"$lte": "2025-12-31"}}
+
+
+def test_build_where_filter_since_and_until():
+    f = build_where_filter(since="2025-06-01", until="2025-12-31")
+    assert f == {"$and": [{"filed_at": {"$gte": "2025-06-01"}}, {"filed_at": {"$lte": "2025-12-31"}}]}
+
+
+def test_build_where_filter_wing_and_since():
+    f = build_where_filter(wing="wing_orion", since="2025-06-01")
+    assert f == {"$and": [{"wing": "wing_orion"}, {"filed_at": {"$gte": "2025-06-01"}}]}
+
+
+def test_build_where_filter_all_params():
+    f = build_where_filter(wing="wing_orion", room="decisions", since="2025-01-01", until="2025-12-31")
+    assert f["$and"][0] == {"wing": "wing_orion"}
+    assert f["$and"][1] == {"room": "decisions"}
+    assert {"filed_at": {"$gte": "2025-01-01"}} in f["$and"]
+    assert {"filed_at": {"$lte": "2025-12-31"}} in f["$and"]
+
+
+def test_search_memories_date_filter_passes_where_to_chroma(tmp_path, monkeypatch):
+    """search_memories passes since/until into the ChromaDB where clause.
+
+    Uses a fake collection so no embedder is needed. Verifies that the
+    where clause reaching ChromaDB contains the filed_at gte/lte conditions.
+    """
+    from mempalace import searcher
+
+    captured_where: list = []
+
+    empty_query_result = {
+        "ids": [[]],
+        "documents": [[]],
+        "metadatas": [[]],
+        "distances": [[]],
+    }
+
+    class _FakeCol:
+        metadata = {}
+
+        def query(self, **kwargs):
+            captured_where.append(kwargs.get("where"))
+            return empty_query_result
+
+        def get(self, **kwargs):
+            return {"ids": [], "documents": [], "metadatas": []}
+
+    fake_col = _FakeCol()
+
+    monkeypatch.setattr(searcher, "get_collection", lambda *a, **kw: fake_col)
+    monkeypatch.setattr(searcher, "get_closets_collection", lambda *a, **kw: _FakeCol())
+    monkeypatch.setattr(searcher, "read_palace_meta", lambda *a, **kw: {})
+
+    searcher.search_memories(
+        "content", str(tmp_path / "palace"), since="2025-05-01", until="2025-12-31", n_results=5
+    )
+
+    assert captured_where, "ChromaDB query was never called"
+    where_used = captured_where[0]
+    assert where_used is not None, "where clause must be set when since/until are provided"
+    # Flatten $and to find the gte/lte conditions
+    clauses = where_used.get("$and", [where_used])
+    assert any(c == {"filed_at": {"$gte": "2025-05-01"}} for c in clauses), (
+        f"since filter missing from where clause: {where_used}"
+    )
+    assert any(c == {"filed_at": {"$lte": "2025-12-31"}} for c in clauses), (
+        f"until filter missing from where clause: {where_used}"
+    )
