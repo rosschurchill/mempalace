@@ -18,6 +18,7 @@ from collections import defaultdict
 from .palace import (
     NORMALIZE_VERSION,
     SKIP_DIRS,
+    _file_content_hash,
     build_closet_lines,
     file_already_mined,
     get_closets_collection,
@@ -534,11 +535,19 @@ def _extract_entities_for_metadata(content: str) -> str:
 
 
 def _build_drawer_record(
-    wing: str, room: str, content: str, source_file: str, chunk_index: int, agent: str
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str,
+    chunk_index: int,
+    agent: str,
+    content_sha256: str = "",
 ):
     """Build (drawer_id, content, metadata) for a single chunk.
 
     Pulled out so process_file can collect records and batch the upsert.
+    content_sha256 should be the SHA256 of the first 64KB of the source file
+    so file_already_mined() can detect same-mtime content edits.
     """
     drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(chunk_index)).encode()).hexdigest()[:24]}"
     metadata = {
@@ -554,6 +563,8 @@ def _build_drawer_record(
         metadata["source_mtime"] = os.path.getmtime(source_file)
     except OSError:
         pass
+    if content_sha256:
+        metadata["content_sha256"] = content_sha256
     metadata["hall"] = detect_hall(content)
     entities = _extract_entities_for_metadata(content)
     if entities:
@@ -590,12 +601,13 @@ def process_file(
     agent: str,
     dry_run: bool,
     closets_col=None,
+    refresh: bool = False,
 ) -> tuple:
     """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
 
-    # Skip if already filed
+    # Skip if already filed (bypass when --refresh forces a full re-mine)
     source_file = str(filepath)
-    if not dry_run and file_already_mined(collection, source_file, check_mtime=True):
+    if not dry_run and not refresh and file_already_mined(collection, source_file, check_mtime=True):
         return 0, "general"
 
     try:
@@ -606,6 +618,9 @@ def process_file(
     content = content.strip()
     if len(content) < MIN_CHUNK_SIZE:
         return 0, "general"
+
+    # Compute content hash once per file for same-mtime dedup (7.3).
+    file_hash = _file_content_hash(source_file)
 
     room = detect_room(filepath, content, rooms, project_path)
     chunks = chunk_text(content, source_file)
@@ -619,7 +634,7 @@ def process_file(
     # both delete, and both insert — creating duplicates or losing data.
     with mine_lock(source_file):
         # Re-check after acquiring lock — another agent may have just finished
-        if file_already_mined(collection, source_file, check_mtime=True):
+        if not refresh and file_already_mined(collection, source_file, check_mtime=True):
             return 0, room
 
         # Purge stale drawers for this file before re-inserting the fresh chunks.
@@ -642,6 +657,7 @@ def process_file(
                 source_file=source_file,
                 chunk_index=chunk["chunk_index"],
                 agent=agent,
+                content_sha256=file_hash,
             )
             for chunk in chunks
         ]
@@ -773,6 +789,7 @@ def mine(
     dry_run: bool = False,
     respect_gitignore: bool = True,
     include_ignored: list = None,
+    refresh: bool = False,
 ):
     """Mine a project directory into the palace."""
 
@@ -799,6 +816,8 @@ def mine(
     print(f"  Palace:  {palace_path}")
     if dry_run:
         print("  DRY RUN — nothing will be filed")
+    if refresh:
+        print("  REFRESH — re-mining all files regardless of mtime/hash")
     if not respect_gitignore:
         print("  .gitignore: DISABLED")
     if include_ignored:
@@ -831,6 +850,7 @@ def mine(
             agent=agent,
             dry_run=dry_run,
             closets_col=closets_col,
+            refresh=refresh,
         )
         if drawers == 0 and not dry_run:
             files_skipped += 1

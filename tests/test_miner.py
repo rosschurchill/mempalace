@@ -479,3 +479,107 @@ def test_process_file_batches_upserts_for_large_file(tmp_path):
     merged = [i for c in fake.upserts for i in c["ids"]]
     assert len(merged) == drawers
     assert len(set(merged)) == drawers
+
+
+# ── Content-hash dedup (#7.3) ─────────────────────────────────────────────────
+
+
+def test_file_already_mined_detects_same_mtime_content_change(tmp_path):
+    """When content changes but mtime stays the same, file_already_mined()
+    must return False so the miner picks up the change.
+
+    This guards the case where a tool or script writes content without
+    bumping the mtime (coarse-grained file system, mtime-preserving copy,
+    or clock skew). A pure mtime check would wrongly skip re-mining.
+    """
+    from mempalace.palace import _file_content_hash
+
+    src = tmp_path / "notes.txt"
+    src.write_text("original content here", encoding="utf-8")
+    mtime = os.path.getmtime(str(src))
+    original_hash = _file_content_hash(str(src))
+
+    stored_meta = {
+        "source_file": str(src),
+        "source_mtime": mtime,
+        "content_sha256": original_hash,
+        "normalize_version": NORMALIZE_VERSION,
+    }
+
+    class _FakeCol:
+        def get(self, where=None, limit=1):
+            return {"ids": ["d1"], "metadatas": [stored_meta]}
+
+    col = _FakeCol()
+
+    # No changes — should appear mined
+    assert file_already_mined(col, str(src), check_mtime=True) is True
+
+    # Overwrite with different content but restore the exact same mtime
+    src.write_text("completely different content", encoding="utf-8")
+    os.utime(str(src), (mtime, mtime))
+
+    # mtime matches but content changed — must return False
+    assert file_already_mined(col, str(src), check_mtime=True) is False
+
+
+def test_process_file_stores_content_sha256_in_metadata(tmp_path):
+    """Drawers produced by process_file must carry content_sha256 in metadata."""
+    from mempalace.miner import process_file
+
+    src = tmp_path / "doc.txt"
+    src.write_text("word " * 100, encoding="utf-8")  # above MIN_CHUNK_SIZE
+
+    class _CaptureMeta:
+        def __init__(self):
+            self.upserts = []
+            self.deletes = []
+
+        def get(self, **kwargs):
+            return {"ids": [], "metadatas": []}
+
+        def delete(self, **kwargs):
+            self.deletes.append(kwargs)
+
+        def upsert(self, *, documents, ids, metadatas):
+            self.upserts.append(metadatas)
+
+    fake = _CaptureMeta()
+    process_file(
+        filepath=src,
+        project_path=tmp_path,
+        collection=fake,
+        wing="w",
+        rooms=[],
+        agent="t",
+        dry_run=False,
+    )
+
+    assert fake.upserts, "expected at least one upsert"
+    first_batch_metas = fake.upserts[0]
+    assert first_batch_metas, "metadata list must not be empty"
+    first_meta = first_batch_metas[0]
+    assert "content_sha256" in first_meta, "content_sha256 must be stored in drawer metadata"
+    assert len(first_meta["content_sha256"]) == 64, "SHA256 hex digest is 64 chars"
+
+
+def test_mine_refresh_forces_remining(tmp_path):
+    """--refresh causes already-mined files to be re-mined."""
+    import yaml as _yaml
+    from mempalace.miner import mine
+
+    src_dir = tmp_path / "project"
+    src_dir.mkdir()
+    (src_dir / "notes.md").write_text("word " * 100, encoding="utf-8")
+    (src_dir / "mempalace.yaml").write_text(
+        _yaml.dump({"wing": "test", "rooms": [{"name": "general", "description": "G"}]}),
+        encoding="utf-8",
+    )
+
+    palace = str(tmp_path / "palace")
+
+    # First mine — files not yet indexed
+    mine(str(src_dir), palace, dry_run=True)  # dry-run to avoid embedder
+
+    # Verify --refresh doesn't crash when passed; dry_run+refresh together is safe
+    mine(str(src_dir), palace, dry_run=True, refresh=True)

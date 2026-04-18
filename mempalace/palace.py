@@ -398,6 +398,20 @@ def mine_lock(source_file: str):
         lf.close()
 
 
+_CONTENT_HASH_BYTES = 64 * 1024  # first 64KB for content-hash dedup
+
+
+def _file_content_hash(path: str) -> str:
+    """SHA256 of the first 64KB of a file. Returns '' on read error."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            h.update(f.read(_CONTENT_HASH_BYTES))
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
 def file_already_mined(collection, source_file: str, check_mtime: bool = False) -> bool:
     """Check if a file has already been filed in the palace.
 
@@ -406,6 +420,8 @@ def file_already_mined(collection, source_file: str, check_mtime: bool = False) 
       - the stored `normalize_version` is missing or older than the current
         schema (triggers silent rebuild after a normalization upgrade)
       - `check_mtime=True` and the file's mtime differs from the stored one
+      - `check_mtime=True`, mtime matches, but `content_sha256` disagrees
+        (catches same-mtime content edits on coarse-grained file systems)
 
     When check_mtime=True (used by project miner), also re-mines on content
     change. When check_mtime=False (used by convo miner), transcripts are
@@ -425,7 +441,15 @@ def file_already_mined(collection, source_file: str, check_mtime: bool = False) 
             if stored_mtime is None:
                 return False
             current_mtime = os.path.getmtime(source_file)
-            return abs(float(stored_mtime) - current_mtime) < 0.001
+            if abs(float(stored_mtime) - current_mtime) >= 0.001:
+                return False  # mtime changed — must re-mine
+            # mtime matches — verify content hasn't changed (catches edits on
+            # file systems where mtime granularity is coarser than the write window)
+            stored_hash = stored_meta.get("content_sha256", "")
+            if stored_hash:
+                current_hash = _file_content_hash(source_file)
+                if current_hash and current_hash != stored_hash:
+                    return False
         return True
     except Exception:
         return False

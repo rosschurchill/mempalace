@@ -142,6 +142,7 @@ def cmd_mine(args):
             dry_run=args.dry_run,
             respect_gitignore=not args.no_gitignore,
             include_ignored=include_ignored,
+            refresh=getattr(args, "refresh", False),
         )
 
 
@@ -617,6 +618,11 @@ def main():
     p_mine.add_argument("--limit", type=int, default=0, help="Max files to process (0 = all)")
     p_mine.add_argument(
         "--dry-run", action="store_true", help="Show what would be filed without filing"
+    )
+    p_mine.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Force re-mining all files regardless of mtime or content hash",
     )
     p_mine.add_argument(
         "--extract",
