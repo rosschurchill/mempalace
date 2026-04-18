@@ -118,10 +118,9 @@ def test_balance_single_wing_passthrough():
 
 def test_balance_limits_dominant_wing():
     """A wing with 8 results shouldn't take all 5 slots."""
-    results = (
-        [_make_result(f"big wing {i}", 0.9 - i * 0.01, wing="wing_big") for i in range(8)]
-        + [_make_result(f"small wing {i}", 0.7 - i * 0.01, wing="wing_small") for i in range(2)]
-    )
+    results = [_make_result(f"big wing {i}", 0.9 - i * 0.01, wing="wing_big") for i in range(8)] + [
+        _make_result(f"small wing {i}", 0.7 - i * 0.01, wing="wing_small") for i in range(2)
+    ]
     out = _cross_wing_balance(results, n_results=5)
     wings = [r["wing"] for r in out]
     assert "wing_small" in wings, "Small wing should appear in balanced results"
@@ -146,6 +145,7 @@ def test_balance_empty_input():
 
 # ── pipeline_trace ────────────────────────────────────────────────────────────
 
+
 def test_search_memories_returns_pipeline_trace(tmp_path):
     """search_memories() results should include pipeline_trace dict."""
     from mempalace.searcher import search_memories
@@ -156,8 +156,16 @@ def test_search_memories_returns_pipeline_trace(tmp_path):
     col.upsert(
         ids=["d1"],
         documents=["postgres was chosen for acid compliance"],
-        metadatas=[{"wing": "wing_orion", "room": "decisions", "source_file": "t.md",
-                    "chunk_index": 0, "filed_at": "2026-01-01", "normalize_version": 2}],
+        metadatas=[
+            {
+                "wing": "wing_orion",
+                "room": "decisions",
+                "source_file": "t.md",
+                "chunk_index": 0,
+                "filed_at": "2026-01-01",
+                "normalize_version": 2,
+            }
+        ],
     )
 
     result = search_memories("why postgres", palace, n_results=1)
@@ -254,8 +262,16 @@ def test_run_explain_with_data(tmp_path):
     col.upsert(
         ids=["d1"],
         documents=["We chose Postgres for Orion because of ACID compliance and backup tooling."],
-        metadatas=[{"wing": "wing_orion", "room": "decisions", "source_file": "t.md",
-                    "chunk_index": 0, "filed_at": "2026-01-01", "normalize_version": 2}],
+        metadatas=[
+            {
+                "wing": "wing_orion",
+                "room": "decisions",
+                "source_file": "t.md",
+                "chunk_index": 0,
+                "filed_at": "2026-01-01",
+                "normalize_version": 2,
+            }
+        ],
     )
 
     kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
@@ -279,3 +295,100 @@ def test_run_explain_with_data(tmp_path):
     # KG fact should be present
     kg_predicates = [f["predicate"] for f in result["kg_facts"]]
     assert "uses" in kg_predicates
+
+
+def test_run_explain_falls_back_to_unscoped_when_scoped_returns_empty(tmp_path, monkeypatch):
+    """Scoped search that returns zero hits must retry unscoped, with
+    reasoning that names the attempted wing. Otherwise callers get empty
+    results plus misleading 'auto-scoped to wing_X' reasoning and no
+    signal that a broader search exists."""
+    from mempalace import searcher
+    from mempalace.knowledge_graph import KnowledgeGraph
+    from mempalace.entity_registry import EntityRegistry
+
+    # Force a wing match for 'Orion' without touching the embedder.
+    # run_explain reads wings from col via _get_all_wings; stub that surface
+    # so 'wing_orion' is considered an existing wing.
+    col_mock = MagicMock()
+    col_mock.count.return_value = 1
+    col_mock.get.return_value = {"metadatas": [{"wing": "wing_orion"}]}
+
+    # Fake search: return empty when scoped, non-empty when unscoped.
+    calls: list = []
+
+    def fake_search(query, palace_path, wing=None, room=None, n_results=5, **kwargs):
+        calls.append({"wing": wing, "room": room})
+        if wing is not None:
+            return {"results": []}
+        return {
+            "results": [
+                {
+                    "text": "Orion is a project using Postgres",
+                    "similarity": 0.8,
+                    "wing": "wing_general",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(searcher, "search_memories", fake_search)
+
+    kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+    registry = EntityRegistry.load(config_dir=tmp_path)
+
+    result = run_explain(
+        query="What did we decide about Orion?",
+        palace_path=str(tmp_path / "palace"),
+        col=col_mock,
+        kg=kg,
+        entity_registry=registry,
+    )
+
+    # Two searches: one scoped to wing_orion, one unscoped fallback
+    assert len(calls) == 2
+    assert calls[0]["wing"] == "wing_orion"
+    assert calls[1]["wing"] is None
+
+    # Response advertises the fallback explicitly
+    assert result.get("scope_fallback") is True
+    assert result.get("wing_scope_attempted") == "wing_orion"
+    # wing_scope reflects what actually produced the returned hits (unscoped)
+    assert result["wing_scope"] is None
+    assert "fell back to unscoped" in result["reasoning"]
+    assert len(result["results"]) == 1
+
+
+def test_run_explain_no_fallback_when_scoped_has_hits(tmp_path, monkeypatch):
+    """Sanity check: when the scoped search finds hits, no fallback happens
+    and the response does not gain the fallback fields."""
+    from mempalace import searcher
+    from mempalace.knowledge_graph import KnowledgeGraph
+    from mempalace.entity_registry import EntityRegistry
+
+    col_mock = MagicMock()
+    col_mock.count.return_value = 1
+    col_mock.get.return_value = {"metadatas": [{"wing": "wing_orion"}]}
+
+    calls: list = []
+
+    def fake_search(query, palace_path, wing=None, room=None, n_results=5, **kwargs):
+        calls.append({"wing": wing, "room": room})
+        return {"results": [{"text": "scoped hit", "similarity": 0.9, "wing": "wing_orion"}]}
+
+    monkeypatch.setattr(searcher, "search_memories", fake_search)
+
+    kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+    registry = EntityRegistry.load(config_dir=tmp_path)
+
+    result = run_explain(
+        query="Orion status",
+        palace_path=str(tmp_path / "palace"),
+        col=col_mock,
+        kg=kg,
+        entity_registry=registry,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["wing"] == "wing_orion"
+    assert "scope_fallback" not in result
+    assert "wing_scope_attempted" not in result
+    assert result["wing_scope"] == "wing_orion"

@@ -29,15 +29,82 @@ from typing import Optional
 # common adjectives, days, months. Filtered out before entity detection.
 _ENTITY_STOPWORDS = frozenset(
     {
-        "The", "This", "That", "These", "Those", "When", "Where", "What", "Why",
-        "Who", "Which", "How", "After", "Before", "Then", "Now", "Here", "There",
-        "And", "But", "Or", "Yet", "So", "If", "Else", "Yes", "No", "Maybe",
-        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
-        "January", "February", "March", "April", "May", "June", "July", "August",
-        "September", "October", "November", "December", "Did", "Does", "Do",
-        "Can", "Should", "Would", "Could", "Will", "Was", "Were", "Has", "Have",
-        "Had", "Are", "Is", "Be", "Been", "Being", "Let", "Make", "Get",
-        "Want", "Need", "Use", "Used", "Using", "Also", "Just", "Very",
+        "The",
+        "This",
+        "That",
+        "These",
+        "Those",
+        "When",
+        "Where",
+        "What",
+        "Why",
+        "Who",
+        "Which",
+        "How",
+        "After",
+        "Before",
+        "Then",
+        "Now",
+        "Here",
+        "There",
+        "And",
+        "But",
+        "Or",
+        "Yet",
+        "So",
+        "If",
+        "Else",
+        "Yes",
+        "No",
+        "Maybe",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+        "Did",
+        "Does",
+        "Do",
+        "Can",
+        "Should",
+        "Would",
+        "Could",
+        "Will",
+        "Was",
+        "Were",
+        "Has",
+        "Have",
+        "Had",
+        "Are",
+        "Is",
+        "Be",
+        "Been",
+        "Being",
+        "Let",
+        "Make",
+        "Get",
+        "Want",
+        "Need",
+        "Use",
+        "Used",
+        "Using",
+        "Also",
+        "Just",
+        "Very",
     }
 )
 
@@ -179,16 +246,18 @@ def run_explain(
                 if facts:
                     kg_enriched_entities.append(entity)
                     for f in facts[:8]:  # cap per-entity facts
-                        kg_facts.append({
-                            "entity": entity,
-                            "subject": f.get("subject", ""),
-                            "predicate": f.get("predicate", ""),
-                            "object": f.get("object", ""),
-                            "valid_from": f.get("valid_from"),
-                            "valid_to": f.get("valid_to"),
-                            "current": f.get("current", True),
-                            "source_closet": f.get("source_closet"),
-                        })
+                        kg_facts.append(
+                            {
+                                "entity": entity,
+                                "subject": f.get("subject", ""),
+                                "predicate": f.get("predicate", ""),
+                                "object": f.get("object", ""),
+                                "valid_from": f.get("valid_from"),
+                                "valid_to": f.get("valid_to"),
+                                "current": f.get("current", True),
+                                "source_closet": f.get("source_closet"),
+                            }
+                        )
             except Exception:
                 pass
 
@@ -200,9 +269,7 @@ def run_explain(
         all_wings = _get_all_wings(col)
         detected_wing = _detect_wing(all_candidates, all_wings)
         if detected_wing:
-            reasoning_parts.append(
-                f"Auto-scoped to '{detected_wing}' based on entity detection."
-            )
+            reasoning_parts.append(f"Auto-scoped to '{detected_wing}' based on entity detection.")
         else:
             reasoning_parts.append(
                 "No matching wing found for detected entities — running unscoped search."
@@ -215,8 +282,7 @@ def run_explain(
 
     if kg_enriched_entities:
         reasoning_parts.append(
-            f"KG enrichment: found {len(kg_facts)} facts for "
-            f"{', '.join(kg_enriched_entities)}."
+            f"KG enrichment: found {len(kg_facts)} facts for {', '.join(kg_enriched_entities)}."
         )
 
     # ── Step 4: Scoped hybrid search ──────────────────────────────────────────
@@ -230,6 +296,28 @@ def run_explain(
 
     hits = search_result.get("results", [])
 
+    # ── Step 4b: Empty-wing fallback ──────────────────────────────────────────
+    # A scoped search that returns zero hits is almost always worse than an
+    # unscoped one — the user gets nothing plus misleading "Auto-scoped to
+    # wing_X" reasoning. Retry unscoped and flag that we did so. The scope
+    # in the response reflects what actually produced the returned hits.
+    scope_fallback = False
+    attempted_wing = detected_wing
+    if detected_wing and not hits:
+        search_result = search_memories(
+            query=query,
+            palace_path=palace_path,
+            wing=None,
+            room=memory_type,
+            n_results=n_results,
+        )
+        hits = search_result.get("results", [])
+        scope_fallback = True
+        detected_wing = None
+        reasoning_parts.append(
+            f"Scoped search to '{attempted_wing}' returned empty — fell back to unscoped."
+        )
+
     # ── Step 5: Build response ────────────────────────────────────────────────
     response: dict = {
         "query": query,
@@ -240,6 +328,9 @@ def run_explain(
         "total_results": len(hits),
         "reasoning": " ".join(reasoning_parts) or "No additional context.",
     }
+    if scope_fallback:
+        response["scope_fallback"] = True
+        response["wing_scope_attempted"] = attempted_wing
 
     if memory_type:
         response["room_filter"] = memory_type
