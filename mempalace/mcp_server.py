@@ -959,6 +959,36 @@ def tool_kg_stats():
     return _kg.stats()
 
 
+def tool_kg_staleness(
+    stale_days: int = 180,
+    entity_silence_days: int = 90,
+    limit: int = 50,
+):
+    """Surface KG facts and entities that may have become stale.
+
+    Flags two categories:
+    1. Triples with no valid_to (still "current") whose valid_from is older
+       than stale_days — these facts have not been confirmed recently.
+    2. Entities not mentioned in any drawer filed within entity_silence_days —
+       possibly forgotten by the mining pipeline.
+
+    Args:
+        stale_days: Facts older than this (days) with no end-date are flagged.
+        entity_silence_days: Entities not in recent drawers for this many days.
+        limit: Max items returned per section (default 50).
+    """
+    from .kg_health import kg_staleness_report
+
+    col = _get_collection(create=False)
+    return kg_staleness_report(
+        _kg,
+        col=col,
+        stale_days=stale_days,
+        entity_silence_days=entity_silence_days,
+        limit=limit,
+    )
+
+
 # ==================== AGENT DIARY ====================
 
 
@@ -1524,6 +1554,36 @@ TOOLS = {
         "description": "Knowledge graph overview: entities, triples, current vs expired facts, relationship types.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_kg_stats,
+    },
+    "mempalace_kg_staleness": {
+        "description": (
+            "Surface KG facts and entities that may have become stale. "
+            "Returns two lists: (1) triples still marked 'current' but not confirmed in "
+            ">stale_days, (2) entities not mentioned in any drawer for >entity_silence_days. "
+            "Call this periodically to find forgotten facts that need verification or invalidation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "stale_days": {
+                    "type": "integer",
+                    "description": "Flag facts older than this many days with no end-date (default 180).",
+                    "minimum": 1,
+                },
+                "entity_silence_days": {
+                    "type": "integer",
+                    "description": "Flag entities not mentioned in drawers for this many days (default 90).",
+                    "minimum": 1,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max items per section (default 50).",
+                    "minimum": 1,
+                    "maximum": 200,
+                },
+            },
+        },
+        "handler": tool_kg_staleness,
     },
     "mempalace_traverse": {
         "description": "Walk the palace graph from a room. Shows connected ideas across wings — the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).",
