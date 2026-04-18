@@ -212,13 +212,153 @@ def test_stop_hook_tracks_save_point(tmp_path):
 # --- hook_session_start ---
 
 
-def test_session_start_passes_through(tmp_path):
+def test_session_start_passes_through_without_opt_in(tmp_path, monkeypatch):
+    """Without MEMPAL_SESSION_START, session start stays a no-op — no tokens,
+    no palace access, no risk of breaking startup if the palace is weird."""
+    monkeypatch.delenv("MEMPAL_SESSION_START", raising=False)
     result = _capture_hook_output(
         hook_session_start,
         {"session_id": "test"},
         state_dir=tmp_path,
     )
     assert result == {}
+
+
+def test_session_start_opt_in_without_palace_is_noop(tmp_path, monkeypatch):
+    """When enabled but the palace can't be opened, degrade silently to {}
+    rather than injecting an error message or blocking the session."""
+    monkeypatch.setenv("MEMPAL_SESSION_START", "1")
+
+    # Force _build_session_start_context down the no-palace path
+    def boom_get_collection(*args, **kwargs):
+        raise RuntimeError("palace missing")
+
+    monkeypatch.setattr("mempalace.palace.get_collection", boom_get_collection)
+    result = _capture_hook_output(
+        hook_session_start,
+        {"session_id": "test"},
+        state_dir=tmp_path,
+    )
+    assert result == {}
+
+
+def test_session_start_opt_in_with_empty_diary_is_noop(tmp_path, monkeypatch):
+    """Opt-in + palace exists but no diary entries → no wake-up block."""
+    monkeypatch.setenv("MEMPAL_SESSION_START", "1")
+
+    class _EmptyCol:
+        def get(self, **kwargs):
+            return {"documents": [], "metadatas": []}
+
+    monkeypatch.setattr("mempalace.palace.get_collection", lambda *a, **k: _EmptyCol())
+    result = _capture_hook_output(
+        hook_session_start,
+        {"session_id": "test"},
+        state_dir=tmp_path,
+    )
+    assert result == {}
+
+
+def test_session_start_opt_in_injects_recent_diary_entries(tmp_path, monkeypatch):
+    """Opt-in + diary entries → additionalContext with the 5 most recent
+    entries, newest first, formatted as a short wake-up block."""
+    monkeypatch.setenv("MEMPAL_SESSION_START", "1")
+
+    # 7 entries spanning 2 wings; top-5 by filed_at should come back
+    entries = [
+        (
+            "older still — skipped",
+            {
+                "wing": "wing_alice",
+                "room": "diary",
+                "topic": "old",
+                "filed_at": "2026-01-01T00:00:00",
+            },
+        ),
+        (
+            "oldest — skipped too",
+            {
+                "wing": "wing_bob",
+                "room": "diary",
+                "topic": "older",
+                "filed_at": "2025-12-01T00:00:00",
+            },
+        ),
+        (
+            "third newest",
+            {
+                "wing": "wing_alice",
+                "room": "diary",
+                "topic": "t3",
+                "filed_at": "2026-04-15T09:00:00",
+            },
+        ),
+        (
+            "newest",
+            {
+                "wing": "wing_alice",
+                "room": "diary",
+                "topic": "t1",
+                "filed_at": "2026-04-18T12:00:00",
+            },
+        ),
+        (
+            "second newest",
+            {"wing": "wing_bob", "room": "diary", "topic": "t2", "filed_at": "2026-04-17T12:00:00"},
+        ),
+        (
+            "fourth newest",
+            {"wing": "wing_bob", "room": "diary", "topic": "t4", "filed_at": "2026-04-10T12:00:00"},
+        ),
+        (
+            "fifth newest",
+            {
+                "wing": "wing_alice",
+                "room": "diary",
+                "topic": "t5",
+                "filed_at": "2026-04-05T12:00:00",
+            },
+        ),
+    ]
+
+    class _Col:
+        def get(self, **kwargs):
+            # Ensure the hook actually filters to diary; return raw payload
+            assert kwargs.get("where") == {"room": "diary"}
+            return {
+                "documents": [e[0] for e in entries],
+                "metadatas": [e[1] for e in entries],
+            }
+
+    monkeypatch.setattr("mempalace.palace.get_collection", lambda *a, **k: _Col())
+
+    result = _capture_hook_output(
+        hook_session_start,
+        {"session_id": "test"},
+        state_dir=tmp_path,
+    )
+
+    assert "hookSpecificOutput" in result
+    hso = result["hookSpecificOutput"]
+    assert hso["hookEventName"] == "SessionStart"
+    ctx = hso["additionalContext"]
+
+    # Only top-5 by filed_at should appear, newest first
+    assert "newest" in ctx
+    assert "second newest" in ctx
+    assert "third newest" in ctx
+    assert "fourth newest" in ctx
+    assert "fifth newest" in ctx
+    # The older entries must be excluded
+    assert "older still" not in ctx
+    assert "oldest" not in ctx
+
+    # Order: newest before second newest (by filed_at desc)
+    assert ctx.index("newest") < ctx.index("second newest")
+    # Wing names are surfaced without the 'wing_' prefix
+    assert "alice" in ctx
+    assert "bob" in ctx
+    assert "wing_alice" not in ctx
 
 
 # --- hook_precompact ---

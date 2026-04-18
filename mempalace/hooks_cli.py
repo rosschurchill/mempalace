@@ -270,18 +270,116 @@ def hook_stop(data: dict, harness: str):
         _output({})
 
 
+# Default number of recent diary entries to surface on session start.
+SESSION_START_LIMIT = 5
+
+# Cap the diary scan so the hook stays inside its 500ms budget even on a
+# large palace. 100 covers months of daily entries — sorted by filed_at
+# we only need the most recent 5.
+_SESSION_START_SCAN_CAP = 100
+
+
+def _build_session_start_context(limit: int = SESSION_START_LIMIT) -> str:
+    """Build a short wake-up block from the most recent diary entries.
+
+    Deliberately cheap: one col.get() with a room=diary filter, local
+    sort, local truncation. No embedder, no ChromaDB query path. Empty
+    string on any failure so the hook degrades to a no-op rather than
+    blocking the session.
+    """
+    try:
+        # Lazy imports: these pull in ChromaDB/config and are only needed
+        # when the feature is opted in.
+        from .config import MempalaceConfig
+        from .palace import get_collection
+    except Exception:
+        return ""
+
+    try:
+        cfg = MempalaceConfig()
+        col = get_collection(cfg.palace_path, create=False)
+    except Exception:
+        return ""
+
+    try:
+        res = col.get(
+            where={"room": "diary"},
+            include=["documents", "metadatas"],
+            limit=_SESSION_START_SCAN_CAP,
+        )
+    except Exception:
+        return ""
+
+    docs = res.get("documents") or []
+    metas = res.get("metadatas") or []
+    if not docs or not metas:
+        return ""
+
+    paired = sorted(
+        zip(docs, metas),
+        key=lambda dm: (dm[1] or {}).get("filed_at", ""),
+        reverse=True,
+    )[: max(1, limit)]
+
+    lines = ["## MemPalace wake-up — recent diary entries"]
+    for doc, meta in paired:
+        meta = meta or {}
+        snippet = (doc or "").strip().replace("\n", " ")
+        if len(snippet) > 200:
+            snippet = snippet[:197] + "..."
+        wing = str(meta.get("wing", "")).removeprefix("wing_")
+        ts = str(meta.get("filed_at", ""))[:10]
+        topic = meta.get("topic", "")
+        header = f"[{ts}]" if ts else "[?]"
+        if wing:
+            header += f" {wing}"
+        if topic:
+            header += f"/{topic}"
+        lines.append(f"- {header} — {snippet}")
+    return "\n".join(lines)
+
+
 def hook_session_start(data: dict, harness: str):
-    """Session start hook: initialize session tracking state."""
+    """Session start hook.
+
+    Opt-in wake-up: when MEMPAL_SESSION_START=1 (or true/yes/on) is set,
+    inject the most recent diary entries via Claude Code's
+    hookSpecificOutput.additionalContext so the model starts with
+    recent palace context loaded. Otherwise pass through.
+
+    Kept opt-in because every session pays the token cost of the wake-up
+    block; users who don't write diary entries gain nothing from it.
+    """
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
 
     _log(f"SESSION START for session {session_id}")
 
-    # Initialize session state directory
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Pass through — no blocking on session start
-    _output({})
+    if os.environ.get("MEMPAL_SESSION_START", "").lower() not in ("true", "1", "yes", "on"):
+        _output({})
+        return
+
+    try:
+        context = _build_session_start_context()
+    except Exception as e:
+        _log(f"SESSION START: wake-up build failed: {e}")
+        _output({})
+        return
+
+    if not context:
+        _output({})
+        return
+
+    _output(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        }
+    )
 
 
 def hook_precompact(data: dict, harness: str):
