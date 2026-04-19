@@ -154,7 +154,7 @@ Two Claude Code hooks save periodically and before context compression:
 ## Requirements
 
 - Python 3.9+
-- A vector-store backend (ChromaDB by default)
+- A vector-store backend (ChromaDB ≥ 1.0 by default)
 - ~300 MB disk for the default embedding model
 
 No API key is required for the core benchmark path.
