@@ -22,6 +22,8 @@ import sqlite3
 from collections import defaultdict
 from datetime import datetime
 
+from .backends.chroma import ChromaBackend
+
 
 def extract_drawers_from_sqlite(db_path: str) -> list:
     """Read all drawers directly from ChromaDB's SQLite, bypassing the API.
@@ -134,8 +136,6 @@ def confirm_destructive_action(
 
 def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
     """Migrate a palace to the currently installed ChromaDB version."""
-    from .backends.chroma import ChromaBackend
-
     palace_path = os.path.abspath(os.path.expanduser(palace_path))
     db_path = os.path.join(palace_path, "chroma.sqlite3")
 
@@ -160,6 +160,16 @@ def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
     try:
         col = ChromaBackend().get_collection(palace_path, "mempalace_drawers")
         count = col.count()
+        if count == 0:
+            # ChromaDB 3.1.x silently opens 3.0.x palaces but returns count=0
+            # instead of raising (#9.7 / issue #469). Verify via raw SQLite —
+            # if rows exist there, the ChromaDB API is lying and we must migrate.
+            raw = extract_drawers_from_sqlite(db_path)
+            if raw:
+                raise RuntimeError(
+                    f"ChromaDB API reports 0 drawers but SQLite contains {len(raw)} — "
+                    "schema mismatch detected, migration required"
+                )
         print(f"\n  Palace is already readable by chromadb {target_version}.")
         print(f"  {count} drawers found. No migration needed.")
         return True
