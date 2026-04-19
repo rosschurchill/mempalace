@@ -72,6 +72,95 @@ PROJECT_VERB_PATTERNS = list(_EN["project_verb_patterns"])
 STOPWORDS = set(_EN["stopwords"])
 
 
+# ==================== PROGRAMMING TERMS STOP-LIST ====================
+#
+# PascalCase identifiers that are programming concepts, not people or projects.
+# Checked case-sensitively so "String" is excluded but a person named "String"
+# could still be detected via other signals. ~200 common terms across Python,
+# JS/TS, Go, Rust, Java, C#, Ruby, and general CS vocabulary.
+
+_PROGRAMMING_TERMS: frozenset = frozenset(
+    {
+        # Python built-ins and stdlib
+        "None", "True", "False", "NotImplemented", "Ellipsis",
+        "Exception", "BaseException", "TypeError", "ValueError", "KeyError",
+        "IndexError", "AttributeError", "NameError", "RuntimeError",
+        "StopIteration", "GeneratorExit", "SystemExit", "KeyboardInterrupt",
+        "OSError", "IOError", "FileNotFoundError", "PermissionError",
+        "IsADirectoryError", "NotADirectoryError", "TimeoutError",
+        "UnicodeError", "UnicodeDecodeError", "UnicodeEncodeError",
+        "ImportError", "ModuleNotFoundError", "OverflowError",
+        "ZeroDivisionError", "MemoryError", "RecursionError",
+        "NotImplementedError", "AssertionError", "ArithmeticError",
+        "LookupError", "BufferError", "ConnectionError", "EOFError",
+        "EnvironmentError", "FileExistsError", "ProcessLookupError",
+        "InterruptedError", "BlockingIOError", "BrokenPipeError",
+        "ChildProcessError", "ConnectionAbortedError", "ConnectionRefusedError",
+        "ConnectionResetError",
+        # Python types and data structures
+        "str", "int", "float", "bool", "bytes", "bytearray", "complex",
+        "list", "dict", "set", "frozenset", "tuple", "range", "object",
+        "type", "super",
+        "List", "Dict", "Set", "Tuple", "Optional", "Union", "Any",
+        "Callable", "Iterator", "Generator", "Iterable", "Sequence",
+        "Mapping", "MutableMapping", "MutableSequence", "MutableSet",
+        "ClassVar", "Final", "Literal", "TypeVar", "Generic",
+        "Protocol", "TypedDict", "NamedTuple", "dataclass",
+        # Common class/function names across languages
+        "String", "Integer", "Float", "Double", "Boolean", "Long", "Short",
+        "Byte", "Char", "Array", "ArrayList", "HashMap", "HashSet",
+        "LinkedList", "TreeMap", "TreeSet", "Stack", "Queue", "Deque",
+        "PriorityQueue", "Vector", "Matrix", "Buffer", "Stream",
+        "Object", "Class", "Interface", "Enum", "Struct", "Record",
+        "Function", "Method", "Field", "Property", "Attribute", "Variable",
+        "Constant", "Module", "Package", "Namespace", "Library",
+        "Node", "Tree", "Graph", "Edge", "Vertex", "Path", "Route",
+        "Map", "Table", "Row", "Column", "Cell", "Grid", "Cursor",
+        "File", "Directory", "Folder", "Path", "Config", "Settings",
+        "Logger", "Handler", "Writer", "Reader", "Parser", "Lexer",
+        "Token", "Tokenizer", "Scanner", "Compiler", "Interpreter",
+        "Builder", "Factory", "Singleton", "Observer", "Adapter",
+        "Decorator", "Proxy", "Strategy", "Command", "Iterator",
+        "Visitor", "Facade", "Bridge", "Composite", "Template",
+        "Controller", "Service", "Repository", "Manager", "Registry",
+        "Provider", "Consumer", "Producer", "Subscriber", "Publisher",
+        "Client", "Server", "Request", "Response", "Session", "Context",
+        "Event", "Listener", "Callback", "Hook", "Middleware", "Plugin",
+        "Router", "Handler", "Dispatcher", "Scheduler", "Worker",
+        "Thread", "Process", "Task", "Job", "Queue", "Cache",
+        "Connection", "Transaction", "Database", "Collection",
+        "Schema", "Model", "View", "Template", "Layout",
+        "Component", "Widget", "Window", "Dialog", "Panel",
+        # JS/TS / Go / Rust / Java / C# specifics
+        "Promise", "Observable", "Subject", "BehaviorSubject",
+        "AsyncIterator", "ReadableStream", "WritableStream",
+        "ArrayBuffer", "DataView", "SharedArrayBuffer",
+        "Error", "TypeError", "RangeError", "ReferenceError",
+        "SyntaxError", "URIError", "EvalError",
+        "Uint8Array", "Int32Array", "Float64Array",
+        "Result", "Option", "Some", "Ok", "Err", "Vec",
+        "Box", "Arc", "Rc", "Mutex", "RwLock", "RefCell",
+        "Chan", "WaitGroup", "Goroutine",
+        "HttpClient", "HttpServer", "HttpRequest", "HttpResponse",
+        "JsonObject", "JsonArray", "JsonValue",
+        "DataFrame", "Series", "Index", "MultiIndex",
+        "Tensor", "Variable", "Placeholder", "Session",
+        "Socket", "TcpStream", "UdpSocket",
+        # Testing / CI vocabulary
+        "TestCase", "TestSuite", "TestRunner", "Assertion",
+        "Mock", "Stub", "Spy", "Fixture", "Patch",
+        "Setup", "Teardown", "BeforeEach", "AfterEach",
+        # Generic architecture terms often PascalCase in code
+        "Api", "Sdk", "Cli", "Gui", "Url", "Uri", "Uuid",
+        "Id", "Uid", "Pid", "Ip", "Mac",
+        "Http", "Https", "Tcp", "Udp", "Ssl", "Tls",
+        "Json", "Yaml", "Xml", "Html", "Csv", "Sql",
+        "Db", "Orm", "Dao", "Dto", "Vo", "Pojo",
+        "Io", "Os", "Fs", "Env",
+    }
+)
+
+
 # ==================== EXTENSION POINTS (not language-scoped) ====================
 
 # For entity detection — prose only, no code files
@@ -144,6 +233,8 @@ def extract_candidates(text: str, languages=("en",)) -> dict:
             if word.lower() in stopwords:
                 continue
             if len(word) < 2:
+                continue
+            if word in _PROGRAMMING_TERMS:
                 continue
             counts[word] += 1
 

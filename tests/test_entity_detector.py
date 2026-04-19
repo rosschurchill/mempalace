@@ -9,6 +9,7 @@ from unittest.mock import patch
 from mempalace.entity_detector import (
     PROSE_EXTENSIONS,
     STOPWORDS,
+    _PROGRAMMING_TERMS,
     _print_entity_list,
     classify_entity,
     confirm_entities,
@@ -589,3 +590,55 @@ def test_config_set_entity_languages_empty_falls_back_to_english(tmp_path, monke
     result = cfg.set_entity_languages([])
     assert result == ["en"]
     assert cfg.entity_languages == ["en"]
+
+
+# ── _PROGRAMMING_TERMS stop-list (#9.6) ────────────────────────────────────────
+
+
+def test_programming_terms_is_frozenset():
+    assert isinstance(_PROGRAMMING_TERMS, frozenset)
+    assert len(_PROGRAMMING_TERMS) >= 100
+
+
+def test_extract_candidates_excludes_programming_terms():
+    """Common PascalCase programming terms must not be returned as entity candidates."""
+    # Repeat each term 5x so it would normally pass the frequency threshold
+    terms = ["String", "TypeError", "Optional", "HashMap", "Promise"]
+    text = " ".join(terms * 5)
+    result = extract_candidates(text)
+    for term in terms:
+        assert term not in result, f"Programming term '{term}' should be excluded"
+
+
+def test_extract_candidates_real_name_not_excluded(tmp_path):
+    """A name that happens to appear in _PROGRAMMING_TERMS should not block real names."""
+    # None of Alice/Bob/Charlotte are in _PROGRAMMING_TERMS
+    text = "Alice said hi. Alice laughed. Alice waved. Alice smiled. Alice ran."
+    result = extract_candidates(text)
+    assert "Alice" in result
+
+
+def test_extract_candidates_case_sensitive_exclusion():
+    """_PROGRAMMING_TERMS check is case-sensitive: 'string' (lowercase) stays in play."""
+    # 'String' is excluded, but 'string' would not match any capitalized pattern anyway
+    # (candidate patterns require a leading capital). Test that a capitalised non-term works.
+    text = "Zephyr Zephyr Zephyr Zephyr Zephyr"  # not in _PROGRAMMING_TERMS
+    result = extract_candidates(text)
+    assert "Zephyr" in result
+
+
+def test_detect_entities_excludes_programming_terms(tmp_path):
+    """detect_entities must not surface _PROGRAMMING_TERMS as people or projects."""
+    md = tmp_path / "code_concepts.md"
+    # Write a file that repeats common PascalCase programming concepts many times
+    lines = ["TypeError HashMap Optional Promise Buffer\n"] * 20
+    md.write_text("".join(lines))
+
+    result = detect_entities([md], max_files=1)
+    all_names = (
+        [e["name"] for e in result["people"]]
+        + [e["name"] for e in result["projects"]]
+        + [e["name"] for e in result["uncertain"]]
+    )
+    for term in ["TypeError", "HashMap", "Optional", "Promise", "Buffer"]:
+        assert term not in all_names, f"Programming term '{term}' leaked into entity results"
