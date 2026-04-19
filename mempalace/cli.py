@@ -405,6 +405,61 @@ def cmd_mcp(args):
         print(f"  {base_server_cmd} --palace /path/to/palace")
 
 
+def cmd_setup_hooks(args):
+    """Write MemPalace hook entries into .claude/settings.json."""
+    import json
+
+    target = Path(args.target).expanduser().resolve()
+    settings_file = target / ".claude" / "settings.json"
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+
+    stop_cmd = "python3 -m mempalace hook run --hook stop --harness claude-code"
+    precompact_cmd = "python3 -m mempalace hook run --hook precompact --harness claude-code"
+
+    hook_entries = {
+        "Stop": [
+            {
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": stop_cmd, "timeout": 30}],
+            }
+        ],
+        "PreCompact": [
+            {
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": precompact_cmd, "timeout": 60}],
+            }
+        ],
+    }
+
+    existing: dict = {}
+    if settings_file.exists():
+        try:
+            existing = json.loads(settings_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
+    existing_hooks = existing.get("hooks", {})
+    for event, entries in hook_entries.items():
+        if event not in existing_hooks:
+            existing_hooks[event] = entries
+        else:
+            cmds_present = {
+                h.get("command", "")
+                for block in existing_hooks[event]
+                for h in block.get("hooks", [])
+            }
+            for entry in entries:
+                for h in entry.get("hooks", []):
+                    if h.get("command", "") not in cmds_present:
+                        existing_hooks[event].append(entry)
+
+    existing["hooks"] = existing_hooks
+    settings_file.write_text(json.dumps(existing, indent=2) + "\n")
+    print(f"MemPalace hooks written to {settings_file}")
+    print("  Stop    →", stop_cmd)
+    print("  PreCompact →", precompact_cmd)
+
+
 def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
     from .backends.chroma import ChromaBackend
@@ -744,6 +799,17 @@ def main():
     p_rem.add_argument("--threshold", type=float, default=0.15,
                        help="Cosine distance threshold (default 0.15 ≈ 85%% similarity)")
 
+    # setup-hooks
+    p_setup_hooks = sub.add_parser(
+        "setup-hooks",
+        help="Write MemPalace Stop + PreCompact hooks into .claude/settings.json",
+    )
+    p_setup_hooks.add_argument(
+        "--target",
+        default=".",
+        help="Directory to write .claude/settings.json into (default: current directory)",
+    )
+
     args = parser.parse_args()
 
     # Merge top-level --palace into args.palace if subparser didn't set it (#847).
@@ -786,6 +852,7 @@ def main():
         "status": cmd_status,
         "pillars": cmd_pillars,
         "rem": cmd_rem,
+        "setup-hooks": cmd_setup_hooks,
     }
     dispatch[args.command](args)
 

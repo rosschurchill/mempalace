@@ -670,3 +670,83 @@ def test_cmd_repair_trailing_slash_does_not_recurse():
     palace_path = os.path.expanduser(args.palace).rstrip(os.sep)
     backup_path = palace_path + ".backup"
     assert not backup_path.startswith(palace_path + os.sep)
+
+
+# ── setup-hooks (#462) ────────────────────────────────────────────────────────
+
+
+def test_setup_hooks_creates_settings(tmp_path):
+    """setup-hooks creates .claude/settings.json with Stop and PreCompact entries."""
+    from mempalace.cli import cmd_setup_hooks
+
+    args = argparse.Namespace(target=str(tmp_path))
+    cmd_setup_hooks(args)
+
+    settings_file = tmp_path / ".claude" / "settings.json"
+    assert settings_file.exists()
+
+    import json
+    data = json.loads(settings_file.read_text())
+    assert "hooks" in data
+    assert "Stop" in data["hooks"]
+    assert "PreCompact" in data["hooks"]
+
+    # Verify the expected commands are present
+    stop_cmds = [
+        h.get("command", "")
+        for block in data["hooks"]["Stop"]
+        for h in block.get("hooks", [])
+    ]
+    assert any("stop" in cmd for cmd in stop_cmds)
+
+    precompact_cmds = [
+        h.get("command", "")
+        for block in data["hooks"]["PreCompact"]
+        for h in block.get("hooks", [])
+    ]
+    assert any("precompact" in cmd for cmd in precompact_cmds)
+
+
+def test_setup_hooks_merges_existing(tmp_path):
+    """setup-hooks merges into existing settings.json without overwriting other keys."""
+    import json
+    from mempalace.cli import cmd_setup_hooks
+
+    settings_dir = tmp_path / ".claude"
+    settings_dir.mkdir()
+    settings_file = settings_dir / "settings.json"
+    existing = {"env": {"MY_VAR": "hello"}, "hooks": {"PostToolUse": []}}
+    settings_file.write_text(json.dumps(existing))
+
+    args = argparse.Namespace(target=str(tmp_path))
+    cmd_setup_hooks(args)
+
+    data = json.loads(settings_file.read_text())
+    # Original key preserved
+    assert data["env"]["MY_VAR"] == "hello"
+    # New hooks added
+    assert "Stop" in data["hooks"]
+    assert "PreCompact" in data["hooks"]
+    # Pre-existing hook key preserved
+    assert "PostToolUse" in data["hooks"]
+
+
+def test_setup_hooks_no_duplicate_on_rerun(tmp_path):
+    """Running setup-hooks twice must not duplicate hook entries."""
+    import json
+    from mempalace.cli import cmd_setup_hooks
+
+    args = argparse.Namespace(target=str(tmp_path))
+    cmd_setup_hooks(args)
+    cmd_setup_hooks(args)
+
+    settings_file = tmp_path / ".claude" / "settings.json"
+    data = json.loads(settings_file.read_text())
+    stop_cmds = [
+        h.get("command", "")
+        for block in data["hooks"]["Stop"]
+        for h in block.get("hooks", [])
+    ]
+    # Only one Stop hook command should be present (no duplicate)
+    stop_mempalace = [c for c in stop_cmds if "mempalace" in c]
+    assert len(stop_mempalace) == 1
