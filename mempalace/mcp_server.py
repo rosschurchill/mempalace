@@ -1006,6 +1006,23 @@ def tool_kg_staleness(
     )
 
 
+def tool_kg_diff(since: str, until: str = None):
+    """Return KG changes (added + invalidated triples) in a time window.
+
+    Args:
+        since: ISO date string (inclusive) — show facts extracted on or after this date.
+        until: ISO date string (exclusive) — defaults to today when omitted.
+
+    Returns:
+        added        — list of triples created in the window
+        invalidated  — list of triples whose valid_to falls in the window
+        since / until — the bounds used
+    """
+    if not _kg:
+        return {"error": "Knowledge graph not available"}
+    return _kg.diff(since=since, until=until)
+
+
 # ==================== AGENT DIARY ====================
 
 
@@ -1607,6 +1624,28 @@ TOOLS = {
             },
         },
         "handler": tool_kg_staleness,
+    },
+    "mempalace_kg_diff": {
+        "description": (
+            "Return KG changes (added and invalidated triples) in a time window. "
+            "Use to audit what the knowledge graph learned or forgot between two dates. "
+            "since/until accept ISO date strings (YYYY-MM-DD)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description": "Start date (inclusive), ISO format e.g. '2026-01-01'",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "End date (exclusive), ISO format. Defaults to today when omitted.",
+                },
+            },
+            "required": ["since"],
+        },
+        "handler": tool_kg_diff,
     },
     "mempalace_traverse": {
         "description": "Walk the palace graph from a room. Shows connected ideas across wings — the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).",

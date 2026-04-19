@@ -40,7 +40,7 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
@@ -390,6 +390,77 @@ class KnowledgeGraph:
             }
             for r in rows
         ]
+
+    # ── Diff ──────────────────────────────────────────────────────────────
+
+    def diff(self, since: str, until: str = None) -> dict:
+        """Return KG changes in the half-open window [since, until).
+
+        Args:
+            since: ISO date string (inclusive). Triples extracted_at >= since.
+            until: ISO date string (exclusive). Defaults to 'now' when omitted.
+
+        Returns a dict with:
+            added        — triples whose extracted_at falls in the window
+            invalidated  — triples whose valid_to falls in the window
+            since / until — the bounds used
+        """
+        until = until or (date.today() + timedelta(days=1)).isoformat()
+
+        with self._lock:
+            conn = self._conn()
+            added_rows = conn.execute(
+                """
+                SELECT t.id, s.name AS subject, t.predicate, o.name AS object,
+                       t.valid_from, t.extracted_at
+                FROM triples t
+                JOIN entities s ON s.id = t.subject
+                JOIN entities o ON o.id = t.object
+                WHERE t.extracted_at >= ? AND t.extracted_at < ?
+                ORDER BY t.extracted_at ASC
+                """,
+                (since, until),
+            ).fetchall()
+
+            invalidated_rows = conn.execute(
+                """
+                SELECT t.id, s.name AS subject, t.predicate, o.name AS object,
+                       t.valid_from, t.valid_to
+                FROM triples t
+                JOIN entities s ON s.id = t.subject
+                JOIN entities o ON o.id = t.object
+                WHERE t.valid_to >= ? AND t.valid_to < ?
+                ORDER BY t.valid_to ASC
+                """,
+                (since, until),
+            ).fetchall()
+
+        return {
+            "since": since,
+            "until": until,
+            "added": [
+                {
+                    "triple_id": r["id"],
+                    "subject": r["subject"],
+                    "predicate": r["predicate"],
+                    "object": r["object"],
+                    "valid_from": r["valid_from"],
+                    "extracted_at": r["extracted_at"],
+                }
+                for r in added_rows
+            ],
+            "invalidated": [
+                {
+                    "triple_id": r["id"],
+                    "subject": r["subject"],
+                    "predicate": r["predicate"],
+                    "object": r["object"],
+                    "valid_from": r["valid_from"],
+                    "valid_to": r["valid_to"],
+                }
+                for r in invalidated_rows
+            ],
+        }
 
     # ── Stats ─────────────────────────────────────────────────────────────
 

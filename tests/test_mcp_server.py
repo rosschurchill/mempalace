@@ -26,10 +26,15 @@ def _get_collection(palace_path, create=False):
 
     Returns (client, collection) so callers can clean up the client
     when they are done.
+
+    Uses the same Settings as ChromaBackend.make_client so ChromaDB 1.x's
+    singleton check doesn't raise "instance already exists with different settings"
+    when the MCP server later opens its own client for the same path.
     """
     import chromadb
+    from chromadb.config import Settings
 
-    client = chromadb.PersistentClient(path=palace_path)
+    client = chromadb.PersistentClient(path=palace_path, settings=Settings(anonymized_telemetry=False))
     if create:
         return (
             client,

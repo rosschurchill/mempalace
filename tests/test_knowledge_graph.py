@@ -137,3 +137,86 @@ class TestStats:
         assert stats["triples"] == 5
         assert stats["current_facts"] == 4  # 1 expired (Acme Corp)
         assert stats["expired_facts"] == 1
+
+
+# ── KnowledgeGraph.diff() (#9.9) ──────────────────────────────────────────────
+
+
+class TestDiff:
+    def test_diff_added_in_window(self, tmp_path):
+        """Triples added today appear in a diff window covering today."""
+        from datetime import date
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        g = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+        g.add_triple("Alice", "works_on", "Orion", valid_from="2026-01-01")
+        today = date.today().isoformat()
+        result = g.diff(since=today)
+        g.close()
+
+        subjects = [r["subject"] for r in result["added"]]
+        assert "Alice" in subjects
+
+    def test_diff_invalidated_in_window(self, tmp_path):
+        """Triples invalidated today appear in invalidated list."""
+        from datetime import date
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        g = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+        g.add_triple("Bob", "uses", "OldLib", valid_from="2024-01-01")
+        g.invalidate("Bob", "uses", "OldLib")
+        today = date.today().isoformat()
+        result = g.diff(since=today)
+        g.close()
+
+        subjects = [r["subject"] for r in result["invalidated"]]
+        assert "Bob" in subjects
+
+    def test_diff_empty_window(self, tmp_path):
+        """A window in the far past returns empty lists."""
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        g = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+        g.add_triple("Carol", "knows", "Dave", valid_from="2026-01-01")
+        result = g.diff(since="2000-01-01", until="2000-01-02")
+        g.close()
+
+        assert result["added"] == []
+        assert result["invalidated"] == []
+
+    def test_diff_result_keys(self, tmp_path):
+        """diff() result must contain required top-level keys."""
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        g = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+        result = g.diff(since="2026-01-01")
+        g.close()
+
+        for key in ("added", "invalidated", "since", "until"):
+            assert key in result
+
+    def test_diff_added_entry_keys(self, tmp_path):
+        """Each added entry must have the expected fields."""
+        from datetime import date
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        g = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+        g.add_triple("Eve", "manages", "Project", valid_from="2026-01-01")
+        result = g.diff(since=date.today().isoformat())
+        g.close()
+
+        assert result["added"], "expected at least one added triple"
+        entry = result["added"][0]
+        for key in ("triple_id", "subject", "predicate", "object", "valid_from", "extracted_at"):
+            assert key in entry, f"missing key '{key}' in added entry"
+
+    def test_diff_mcp_tool_registered(self):
+        """mempalace_kg_diff must be in the TOOLS dict."""
+        from mempalace.mcp_server import TOOLS
+        assert "mempalace_kg_diff" in TOOLS
+
+    def test_diff_mcp_tool_requires_since(self):
+        """mempalace_kg_diff schema must require 'since'."""
+        from mempalace.mcp_server import TOOLS
+        schema = TOOLS["mempalace_kg_diff"]["input_schema"]
+        assert "since" in schema.get("required", [])
