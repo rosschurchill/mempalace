@@ -808,3 +808,152 @@ class TestCacheInvalidation:
         assert result["success"] is True
         assert "Reconnected" in result["message"]
         assert isinstance(result["drawers"], int)
+
+
+# ── Cross-location content dedup (#464) + aaak_compress on diary_write (#466) ──
+
+
+class _FakeColDedup:
+    """Fake ChromaDB collection for cross-location content dedup tests."""
+
+    def __init__(self):
+        self._store = {}  # id -> (meta, doc)
+
+    def get(self, ids=None, where=None, limit=None, include=None, **kwargs):
+        if ids:
+            if ids[0] in self._store:
+                meta, doc = self._store[ids[0]]
+                return {"ids": [ids[0]], "metadatas": [meta], "documents": [doc]}
+            return {"ids": [], "metadatas": [], "documents": []}
+        if where:
+            hash_val = where.get("content_sha256")
+            for did, (meta, doc) in self._store.items():
+                if meta.get("content_sha256") == hash_val:
+                    return {"ids": [did], "metadatas": [meta], "documents": [doc]}
+            return {"ids": [], "metadatas": [], "documents": []}
+        return {"ids": [], "metadatas": [], "documents": []}
+
+    def upsert(self, ids, documents, metadatas):
+        self._store[ids[0]] = (metadatas[0], documents[0])
+
+    def add(self, ids, documents, metadatas):
+        self._store[ids[0]] = (metadatas[0], documents[0])
+
+
+class TestCrossLocationDedup:
+    """#464: same content in a different wing/room detected via content_sha256 metadata."""
+
+    def test_same_content_different_location_returns_duplicate(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        fake_col = _FakeColDedup()
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: fake_col)
+        monkeypatch.setattr(mcp_server, "_metadata_cache", None)
+
+        content = "This exact content will be filed twice in different wings."
+        r1 = mcp_server.tool_add_drawer(wing="wing_a", room="room_x", content=content)
+        assert r1["success"] is True
+        assert r1.get("reason") != "content_duplicate"
+
+        r2 = mcp_server.tool_add_drawer(wing="wing_b", room="room_y", content=content)
+        assert r2["success"] is True
+        assert r2["reason"] == "content_duplicate"
+
+    def test_different_content_same_location_not_flagged(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        fake_col = _FakeColDedup()
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: fake_col)
+        monkeypatch.setattr(mcp_server, "_metadata_cache", None)
+
+        r1 = mcp_server.tool_add_drawer(wing="w", room="r", content="First unique content here.")
+        r2 = mcp_server.tool_add_drawer(wing="w", room="r", content="Second unique content here.")
+        assert r1["success"] is True
+        assert r2["success"] is True
+        assert r2.get("reason") != "content_duplicate"
+
+    def test_content_sha256_stored_in_metadata(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        fake_col = _FakeColDedup()
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: fake_col)
+        monkeypatch.setattr(mcp_server, "_metadata_cache", None)
+
+        content = "Metadata hash test content."
+        r = mcp_server.tool_add_drawer(wing="w", room="r", content=content)
+        assert r["success"] is True
+
+        did = r["drawer_id"]
+        stored_meta = fake_col._store[did][0]
+        assert "content_sha256" in stored_meta
+        assert len(stored_meta["content_sha256"]) == 64  # SHA-256 hex digest
+
+    def test_cross_location_duplicate_reports_original_location(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        fake_col = _FakeColDedup()
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: fake_col)
+        monkeypatch.setattr(mcp_server, "_metadata_cache", None)
+
+        content = "Shared content that will be duplicated."
+        mcp_server.tool_add_drawer(wing="wing_original", room="room_original", content=content)
+        r2 = mcp_server.tool_add_drawer(wing="wing_copy", room="room_copy", content=content)
+
+        assert r2["reason"] == "content_duplicate"
+        assert r2["duplicate_wing"] == "wing_original"
+        assert r2["duplicate_room"] == "room_original"
+
+
+class TestDiaryWriteAaakCompress:
+    """#466: aaak_compress=True param compresses the entry before storage."""
+
+    def test_aaak_compress_false_stores_raw(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        fake_col = _FakeColDedup()
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: fake_col)
+        monkeypatch.setattr(mcp_server, "_metadata_cache", None)
+
+        entry = "Today I worked on the authentication module and reviewed pull requests."
+        r = mcp_server.tool_diary_write(agent_name="agent", entry=entry, aaak_compress=False)
+        assert r["success"] is True
+
+        eid = r["entry_id"]
+        stored_doc = fake_col._store[eid][1]
+        assert stored_doc == entry  # no compression — stored verbatim
+
+    def test_aaak_compress_true_compresses_entry(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        fake_col = _FakeColDedup()
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: fake_col)
+        monkeypatch.setattr(mcp_server, "_metadata_cache", None)
+
+        entry = "Today I worked on the authentication module and reviewed pull requests carefully."
+        r = mcp_server.tool_diary_write(agent_name="agent", entry=entry, aaak_compress=True)
+        assert r["success"] is True
+
+        eid = r["entry_id"]
+        stored_doc = fake_col._store[eid][1]
+        # AAAK compression transforms the entry (adds a header, compresses keywords)
+        # so the stored document is different from the verbatim input.
+        assert stored_doc != entry
+
+    def test_aaak_compress_param_in_tools_schema(self):
+        from mempalace.mcp_server import TOOLS
+
+        schema = TOOLS["mempalace_diary_write"]["input_schema"]
+        assert "aaak_compress" in schema["properties"]
+        assert schema["properties"]["aaak_compress"]["type"] == "boolean"

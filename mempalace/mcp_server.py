@@ -75,6 +75,7 @@ from .explain import run_explain  # noqa: E402
 from .entity_registry import EntityRegistry  # noqa: E402
 from .ambient import get_whisper, get_socratic_question, get_eigen_thoughts  # noqa: E402
 from .rem_cycle import run_rem_cycle  # noqa: E402
+from .dialect import Dialect as _Dialect  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -635,9 +636,8 @@ def tool_add_drawer(
     if not col:
         return _no_palace()
 
-    drawer_id = (
-        f"drawer_{wing}_{room}_{hashlib.sha256((wing + room + content).encode()).hexdigest()[:24]}"
-    )
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256((wing + room + content).encode()).hexdigest()[:24]}"
 
     _wal_log(
         "add_drawer",
@@ -659,6 +659,22 @@ def tool_add_drawer(
     except Exception:
         pass
 
+    # Cross-location content dedup (#464): same content filed in a different wing/room.
+    try:
+        dupes = col.get(where={"content_sha256": content_hash}, limit=1, include=["metadatas"])
+        if dupes and dupes.get("ids"):
+            existing_id = dupes["ids"][0]
+            existing_meta = (dupes.get("metadatas") or [{}])[0]
+            return {
+                "success": True,
+                "reason": "content_duplicate",
+                "drawer_id": existing_id,
+                "duplicate_wing": existing_meta.get("wing", ""),
+                "duplicate_room": existing_meta.get("room", ""),
+            }
+    except Exception:
+        pass
+
     try:
         col.upsert(
             ids=[drawer_id],
@@ -671,6 +687,7 @@ def tool_add_drawer(
                     "chunk_index": 0,
                     "added_by": added_by,
                     "filed_at": datetime.now().isoformat(),
+                    "content_sha256": content_hash,
                 }
             ],
         )
@@ -992,7 +1009,7 @@ def tool_kg_staleness(
 # ==================== AGENT DIARY ====================
 
 
-def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
+def tool_diary_write(agent_name: str, entry: str, topic: str = "general", aaak_compress: bool = False):
     """
     Write a diary entry for this agent. Each agent gets its own wing
     with a diary room. Entries are timestamped and accumulate over time.
@@ -1008,6 +1025,12 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
         topic = sanitize_name(topic, "topic")
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    if aaak_compress:
+        try:
+            entry = _Dialect().compress(entry)
+        except Exception:
+            pass  # fall back to uncompressed if Dialect fails
 
     wing = f"wing_{agent_name.lower().replace(' ', '_')}"
     room = "diary"
@@ -1836,6 +1859,10 @@ TOOLS = {
                 "topic": {
                     "type": "string",
                     "description": "Topic tag (optional, default: general)",
+                },
+                "aaak_compress": {
+                    "type": "boolean",
+                    "description": "If true, run the entry through AAAK compression before storing (default: false)",
                 },
             },
             "required": ["agent_name", "entry"],
